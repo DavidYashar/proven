@@ -220,6 +220,8 @@ verifies against the producer set it can fetch, reporting `rpc-asserted`.
 npm test            # 22 offline vector tests, no network
 npm run test:attack # a forged validator set that only a checkpoint can catch
 npm run test:live   # an RPC that tampers with responses on the wire
+npx tsx scripts/bench.ts      # latency of the proxy versus a direct RPC
+npx tsx scripts/proof_depth.ts # how far back a proof can be obtained
 ```
 
 ```text
@@ -275,6 +277,28 @@ keep working untouched. The verdict rides in headers.
 A response that **fails** verification is never handed back: the proxy returns a JSON-RPC error
 (`-32002`) instead, so a lying upstream cannot inject data silently. `PROVEN_STRICT=1` additionally
 refuses methods that have no proof primitive at all, rather than forwarding them unverified.
+
+### Cost
+
+Measured against `free.rpc.fastnear.com` from a consumer connection (`npx tsx scripts/bench.ts`,
+9 samples, median):
+
+| Call | direct | via proxy |
+|---|---|---|
+| `block` (header hash re-checked locally) | 114 ms | 87 ms |
+| `EXPERIMENTAL_tx_status` (full light client proof) | 105 ms | **168 ms** |
+
+So a verified transaction costs ~60 ms more than an unverified one: one extra proof fetch plus a few
+milliseconds of ed25519 and sha256. The head is resolved once and reused for 5 s — before that cache
+the same call measured **685 ms median, 2.4 s p90**, because every request re-resolved it with six
+RPC calls.
+
+Verifying in bulk should not use the proxy at all: resolve one head and reuse it.
+
+```ts
+const head = await resolveHead({ rpcs: [rpc], checkpoint });
+for (const tx of batch) await verifyTransaction(tx.hash, tx.signer, { rpc, checkpoint, resolvedHead: head });
+```
 
 `GET /status` reports the live head, the pinned checkpoint, the active upstream and counters; `GET /health`
 is there for platform health checks. CORS is open, so a browser can talk to it directly.
@@ -368,6 +392,15 @@ difference between "possible" and "reimplement all of near-primitives".
   light client block, fully `anchored`
 - ❌ account **balance** proofs — `view_account` returns no proof and NEAR exposes no account-record
   proof endpoint, so this is impossible without a protocol change
+
+### How far back a proof reaches
+
+Verification covers recent history, not an archive. Measured on mainnet (`npx tsx
+scripts/proof_depth.ts`): a transaction 80,000 blocks back still produced a valid proof; a
+week-old one is refused by the node. The binding constraints are the head's block merkle tree (a
+proof must land inside the tree the head commits to) plus the provider's outcome retention — an
+archival node pushes both out, a pruned public endpoint pulls them in. Contract-storage proofs are
+limited the same way for historical block heights, while *current* state is always provable.
 
 ## Things we had to discover the hard way
 

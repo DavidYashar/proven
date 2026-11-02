@@ -7,7 +7,7 @@ import { authenticateBlockRoots, encodeInnerRest } from "./block-header.js";
 import { sha256 } from "./borsh.js";
 import { NearRpc } from "./rpc.js";
 import { verifyContractState } from "./state.js";
-import { resolveHead } from "./trust.js";
+import { resolveHead, type ResolvedHead } from "./trust.js";
 import { verifyTransaction } from "./verifier.js";
 import { b58decode } from "./base58.js";
 import { equalBytes } from "./borsh.js";
@@ -105,12 +105,43 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
     return a === b;
   }
 
+  /**
+   * The head is what every proof is checked against, and resolving it costs several RPC round-trips.
+   * It moves once a second, so holding it briefly is free in trust terms and turns a 6-call request
+   * into a 1-call request. A proof built against a slightly older head still verifies — it only has
+   * to be inside the head's block merkle tree.
+   */
+  const HEAD_TTL_MS = 5_000;
+  let cachedHead: { at: number; resolved: ResolvedHead } | null = null;
+  let headInFlight: Promise<ResolvedHead> | null = null;
+
+  async function head(force = false): Promise<ResolvedHead> {
+    if (!force && cachedHead && Date.now() - cachedHead.at < HEAD_TTL_MS) return cachedHead.resolved;
+    if (!headInFlight) {
+      headInFlight = resolveHead({ rpcs, checkpoint: options.checkpoint })
+        .then((resolved) => {
+          cachedHead = { at: Date.now(), resolved };
+          return resolved;
+        })
+        .finally(() => {
+          headInFlight = null;
+        });
+    }
+    return headInFlight;
+  }
+
   async function verify(method: string, params: any, result: any): Promise<{ verdict: Verdict; trust: string; detail: string }> {
     if (method === "tx" || method === "EXPERIMENTAL_tx_status") {
       const hash = params?.tx_hash;
       const signer = params?.sender_account_id ?? params?.signer_account_id;
       if (!hash || !signer) throw new Error("tx_status without tx_hash/sender_account_id cannot be verified");
-      const proven = await verifyTransaction(hash, signer, { rpcs, checkpoint: options.checkpoint });
+      const run = (resolvedHead: ResolvedHead) =>
+        verifyTransaction(hash, signer, { rpcs, checkpoint: options.checkpoint, resolvedHead });
+      // A cached head can age out of the proof window; retry once against a fresh one.
+      const proven = await run(await head()).catch(async (error) => {
+        if (!cachedHead) throw error;
+        return run(await head(true));
+      });
       const reported = result?.transaction_outcome?.outcome;
       const matches = outcomesMatch(reported, proven.value.outcome);
       const ok = proven.verified && matches;
@@ -128,7 +159,12 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
     if (method === "query" && params?.request_type === "view_state" && params?.include_proof) {
       const accountId = params.account_id;
       const key = params.prefix_base64 ? Uint8Array.from(Buffer.from(params.prefix_base64, "base64")) : new Uint8Array();
-      const proven = await verifyContractState(accountId, key, { rpcs, checkpoint: options.checkpoint });
+      const run = (resolvedHead: ResolvedHead) =>
+        verifyContractState(accountId, key, { rpcs, checkpoint: options.checkpoint, resolvedHead });
+      const proven = await run(await head()).catch(async (error) => {
+        if (!cachedHead) throw error;
+        return run(await head(true));
+      });
       const reported = (result?.values ?? [])[0];
       const matches = proven.value.value === null ? !reported : reported && bytesToBase64(proven.value.value) === reported.value;
       const ok = proven.verified && matches;

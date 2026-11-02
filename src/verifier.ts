@@ -17,6 +17,13 @@ export interface VerifyOptions {
   requireAnchor?: boolean;
   /** How many blocks behind the final head to anchor the light client block request. */
   anchorDepth?: number;
+  /**
+   * A head that was already resolved (and verified) by the caller. Serving many proofs in a row is
+   * the normal case — a proxy or an indexer — and re-resolving the head per request multiplies the
+   * RPC traffic by six. Reusing one head costs nothing in trust: it is the same authority the proof
+   * is checked against, and a caller that resolves it once has already paid for it.
+   */
+  resolvedHead?: ResolvedHead;
 }
 
 export interface ProvenOutcome {
@@ -103,7 +110,7 @@ export async function verifyTransaction(
   senderId: string,
   options: VerifyOptions = {},
 ): Promise<ProvenResult<ProvenOutcome>> {
-  const resolved = await resolveHead(resolveOptions(options));
+  const resolved = options.resolvedHead ?? (await resolveHead(resolveOptions(options)));
   const proof = (await firstProof(options, (rpc) =>
     rpc.lightClientProofTransaction(transactionHash, senderId, b58encode(resolved.head.blockHash)),
   )) as LightClientProof;
@@ -127,7 +134,7 @@ export async function verifyReceipt(
   receiverId: string,
   options: VerifyOptions = {},
 ): Promise<ProvenResult<ProvenOutcome>> {
-  const resolved = await resolveHead(resolveOptions(options));
+  const resolved = options.resolvedHead ?? (await resolveHead(resolveOptions(options)));
   const proof = (await firstProof(options, (rpc) =>
     rpc.lightClientProofReceipt(receiptId, receiverId, b58encode(resolved.head.blockHash)),
   )) as LightClientProof;

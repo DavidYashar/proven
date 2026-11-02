@@ -14,14 +14,15 @@ import type { Check, ProvenResult, TrustLevel } from "./types.js";
  * without breaking the path, because every node on the way is sha256-addressed and the leaf commits
  * to `sha256(value)`.
  *
- * What is **not** yet anchored: the state root itself. NEAR's RPC exposes no proof for a chunk
- * header, so binding `prev_state_root` to the light client head would require re-encoding
- * `BlockHeaderInnerRest` and `ShardChunkHeader` (both protocol-versioned). Until that lands, the
- * trust level is `quorum` (independent RPCs agree on the root) or `rpc-asserted`, never `anchored`.
+ * The state root is then anchored to validator signatures by re-encoding `BlockHeaderInnerRestV6`
+ * and every `ShardChunkHeaderInner`, and checking `chunk_headers_root` against the head's
+ * `inner_rest_hash` (see `block-header.ts`). With a pin, the verdict is `anchored`.
  */
 export interface ContractStateOptions extends Omit<ResolveHeadOptions, "rpcs"> {
   rpc?: string | NearRpc;
   rpcs?: Array<string | NearRpc>;
+  /** A head that was already resolved and verified, to avoid re-resolving it per call. */
+  resolvedHead?: ResolvedHead;
 }
 
 export interface ContractStateValue {
@@ -51,12 +52,14 @@ export async function verifyContractState(
   options: ContractStateOptions = {},
 ): Promise<ProvenResult<ContractStateValue>> {
   const rpcs = (options.rpcs?.length ? options.rpcs : [options.rpc ?? DEFAULT_RPC]).map(asRpc);
-  const resolved = await resolveHead({
-    rpcs,
-    checkpoint: options.checkpoint,
-    requireAnchor: options.requireAnchor,
-    anchorDepth: options.anchorDepth,
-  });
+  const resolved =
+    options.resolvedHead ??
+    (await resolveHead({
+      rpcs,
+      checkpoint: options.checkpoint,
+      requireAnchor: options.requireAnchor,
+      anchorDepth: options.anchorDepth,
+    }));
   const checks: Check[] = [...resolved.checks];
   const notes: string[] = [...resolved.notes];
 
