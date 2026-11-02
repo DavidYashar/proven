@@ -222,6 +222,7 @@ npm run test:attack # a forged validator set that only a checkpoint can catch
 npm run test:live   # an RPC that tampers with responses on the wire
 npx tsx scripts/bench.ts      # latency of the proxy versus a direct RPC
 npx tsx scripts/proof_depth.ts # how far back a proof can be obtained
+npx tsx scripts/provider_matrix.ts # which providers a verifier can actually use
 ```
 
 ```text
@@ -309,8 +310,26 @@ that error with `x-proven-verified: false`. Only a transport failure (nothing an
 
 `UPSTREAM_RPC` accepts a comma-separated list: the first entry is primary, the rest are failover,
 and the last one that worked is tried first, so one flaky provider is never visible to the caller.
-Only `free.rpc.fastnear.com` and `rpc.mainnet.near.org` answer `next_light_client_block` publicly —
-`near.drpc.org` and `1rpc.io/near` reject it, which makes them useless as upstreams for a verifier.
+
+**Which providers a verifier can use.** `next_light_client_block` and `light_client_proof` are
+standard nearcore methods, so any real node answers them — including one you run yourself. Gateways
+that whitelist methods do not. Probed with `npx tsx scripts/provider_matrix.ts` against every public
+endpoint listed on [docs.near.org/api/rpc/providers](https://docs.near.org/api/rpc/providers):
+
+| Endpoint | `next_light_client_block` | `light_client_proof` | CORS |
+|---|---|---|---|
+| `free.rpc.fastnear.com` | ✅ | ✅ | `*` |
+| `archival-rpc.mainnet.near.org` | ✅ | ✅ | `*` |
+| `rpc.mainnet.near.org` | ✅ | ✅ | `*` |
+| `rpc.intea.rs` | ✅ | ✅ | `*` |
+| `rpc.shitzuapes.xyz` | ✅ | ✅ | echoes origin |
+| `near.drpc.org` | ❌ method not available | ❌ | `*` |
+| `1rpc.io/near` | ❌ | ❌ | `*` |
+| `near.blockpi.network/v1/rpc/public` | ❌ needs a key | — | `*` |
+| `api.zan.top/...`, `rpc.ankr.com/near` | ❌ path/auth error | — | — |
+
+Anything runnable as a nearcore node is usable, keyed endpoints included; the failures above are
+gateways, not nodes. FastNear's archival endpoint is the one that matters for older history.
 
 Deploy both services with [render.yaml](./render.yaml) (Blueprint → this repo): a Node web service
 for the proxy and a static site for the app, with `VITE_DEFAULT_RPC` pointing the app at the proxy.
