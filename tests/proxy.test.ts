@@ -1,0 +1,184 @@
+// The proxy's contract: an honest upstream is marked verified, a lying one is caught, and strict
+// mode refuses what cannot be verified at all.
+//
+//   npx tsx tests/proxy.test.ts        (needs network for the honest case)
+import assert from "node:assert/strict";
+import { createServer, type Server } from "node:http";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+
+import { createProvenProxy, loadCheckpoint } from "../src/proxy.js";
+
+// Free public endpoints drop requests under load, so the tests use the same failover list the
+// deployment does. Only these two answer `next_light_client_block`.
+const UPSTREAMS = (process.env.UPSTREAM_RPC ?? "https://free.rpc.fastnear.com,https://rpc.mainnet.near.org")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const UPSTREAM = UPSTREAMS[0];
+const checkpoint = loadCheckpoint(fileURLToPath(new URL("../checkpoints/mainnet.json", import.meta.url)));
+if (!checkpoint) throw new Error("test needs checkpoints/mainnet.json (run `npm run checkpoint`)");
+
+const listen = (server: Server): Promise<number> =>
+  new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      resolve(typeof address === "object" && address ? address.port : 0);
+    });
+  });
+
+async function rpc(url: string, method: string, params: unknown): Promise<{ status: number; headers: Headers; body: any }> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: "test", method, params }),
+  });
+  return { status: response.status, headers: response.headers, body: await response.json() };
+}
+
+/** Tries each provider in turn, because a free endpoint will return an error now and then. */
+async function rpcAny(method: string, params: unknown): Promise<{ status: number; headers: Headers; body: any }> {
+  let last: any;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    for (const url of UPSTREAMS) {
+      const res = await rpc(url, method, params).catch((error) => ({
+        status: 0,
+        headers: new Headers(),
+        body: { error: { message: String(error) } },
+      }));
+      if (res.body?.result !== undefined) return res;
+      last = res;
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  throw new Error(`no provider answered ${method}: ${JSON.stringify(last?.body?.error ?? last?.body).slice(0, 200)}`);
+}
+
+/** A near transaction to test with, found near the head. */
+async function sampleTransaction(): Promise<{ hash: string; signer: string }> {
+  const head = await rpcAny("block", { finality: "final" });
+  for (let back = 6; back < 40; back++) {
+    const block = await rpcAny("block", { block_id: Number(head.body.result.header.height) - back });
+    const chunks = block.body.result?.chunks;
+    if (!chunks) continue;
+    for (let shard = 0; shard < chunks.length; shard++) {
+      try {
+        const chunk = await rpcAny("chunk", { block_id: block.body.result.header.hash, shard_id: shard });
+        const tx = (chunk.body.result?.transactions ?? []).find((t: any) => t.signer_id);
+        if (tx) return { hash: tx.hash, signer: tx.signer_id };
+      } catch {
+        continue;
+      }
+    }
+  }
+  throw new Error("no sample transaction found");
+}
+
+/** An upstream that rewrites the transaction outcome on its way back. */
+function startLiar(): Promise<{ url: string; close: () => void }> {
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", async () => {
+      const body = await fetch(UPSTREAM, { method: "POST", headers: { "content-type": "application/json" }, body: raw });
+      const json: any = await body.json();
+      if (json.result?.transaction_outcome?.outcome) {
+        json.result.transaction_outcome.outcome.executor_id = `${json.result.transaction_outcome.outcome.executor_id}-attacker`;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(json));
+    });
+  });
+  return new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({ url: `http://127.0.0.1:${port}`, close: () => server.close() });
+    }),
+  );
+}
+
+test("honest upstream: tx status is verified and tagged anchored", async () => {
+  const proxy = createProvenProxy({ upstream: UPSTREAMS, checkpoint });
+  const server = await proxy.listen(0, "127.0.0.1");
+  try {
+    const tx = await sampleTransaction();
+    const port = (server.address() as any).port;
+    const response = await rpc(`http://127.0.0.1:${port}`, "EXPERIMENTAL_tx_status", {
+      tx_hash: tx.hash,
+      sender_account_id: tx.signer,
+      wait_until: "FINAL",
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-proven-verified"), "true", JSON.stringify(response.body).slice(0, 200));
+    assert.equal(response.headers.get("x-proven-trust"), "anchored");
+    assert.equal(response.body.result.transaction_outcome.outcome.executor_id, tx.signer.length ? response.body.result.transaction_outcome.outcome.executor_id : "");
+  } finally {
+    server.close();
+  }
+});
+
+test("lying upstream: a rewritten outcome is refused, not forwarded", async () => {
+  const liar = await startLiar();
+  const proxy = createProvenProxy({ upstream: [liar.url, ...UPSTREAMS], checkpoint });
+  const server = await proxy.listen(0, "127.0.0.1");
+  try {
+    const tx = await sampleTransaction();
+    const port = (server.address() as any).port;
+    const response = await rpc(`http://127.0.0.1:${port}`, "EXPERIMENTAL_tx_status", {
+      tx_hash: tx.hash,
+      sender_account_id: tx.signer,
+    });
+    assert.equal(response.headers.get("x-proven-verified"), "false");
+    assert.ok(response.body.error, "the payload must not be handed back");
+    assert.match(response.body.error.message, /verification failed/);
+  } finally {
+    server.close();
+    liar.close();
+  }
+});
+
+test("strict mode refuses methods that have no proof primitive", async () => {
+  const proxy = createProvenProxy({ upstream: UPSTREAMS, checkpoint, strict: true });
+  const server = await proxy.listen(0, "127.0.0.1");
+  try {
+    const port = (server.address() as any).port;
+    const response = await rpc(`http://127.0.0.1:${port}`, "query", {
+      request_type: "view_account",
+      account_id: "sweat-relayer.near",
+      finality: "final",
+    });
+    assert.equal(response.headers.get("x-proven-verified"), "rejected");
+    assert.equal(response.body.error.code, -32001);
+  } finally {
+    server.close();
+  }
+});
+
+test("status page reports the live head and counters", async () => {
+  const proxy = createProvenProxy({ upstream: UPSTREAMS, checkpoint });
+  const server = await proxy.listen(0, "127.0.0.1");
+  try {
+    const port = (server.address() as any).port;
+    const response = await fetch(`http://127.0.0.1:${port}/status`);
+    const body: any = await response.json();
+    assert.equal(body.service, "proven proxy");
+    assert.ok(body.head.height > 0);
+    assert.ok(body.verifiable.some((v: string) => v.startsWith("query")));
+  } finally {
+    server.close();
+  }
+});
+
+test("observing mode forwards unverifiable methods with an honest header", async () => {
+  const proxy = createProvenProxy({ upstream: UPSTREAMS, checkpoint });
+  const server = await proxy.listen(0, "127.0.0.1");
+  try {
+    const port = (server.address() as any).port;
+    const response = await rpc(`http://127.0.0.1:${port}`, "status", {});
+    assert.equal(response.headers.get("x-proven-verified"), "unverified");
+    assert.equal(response.body.result?.chain_id, "mainnet");
+  } finally {
+    server.close();
+  }
+});

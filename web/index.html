@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>proven — the NEAR RPC you don't have to trust</title>
+    <meta
+      name="description"
+      content="Verify NEAR transactions and light client heads in your browser against validator signatures."
+    />
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header class="masthead">
+        <div class="brand">
+          <span class="logo">◈</span>
+          <h1>proven</h1>
+          <span class="tagline">the NEAR RPC you don't have to trust</span>
+        </div>
+        <div class="trust-badge" id="trust-badge" data-trust="idle">idle</div>
+      </header>
+
+      <section class="card">
+        <div class="row">
+          <label for="rpc">RPC endpoint</label>
+          <input id="rpc" type="url" spellcheck="false" value="https://free.rpc.fastnear.com" />
+        </div>
+        <div class="row checkpoint-row">
+          <span class="label">checkpoint</span>
+          <span id="checkpoint-status" class="checkpoint-status">loading…</span>
+          <button id="repin" class="ghost" type="button" title="Trust this head's validator set from now on (trust-on-first-use)">
+            re-pin current set
+          </button>
+        </div>
+        <div class="row">
+          <span class="label">strictness</span>
+          <label class="checkbox">
+            <input id="require-anchor" type="checkbox" />
+            require anchored trust — fail instead of downgrading when the checkpoint does not apply
+          </label>
+        </div>
+
+        <div class="row lie-row">
+          <span class="label">endpoint behaviour</span>
+          <select id="lie"></select>
+        </div>
+        <p class="lie-blurb" id="lie-blurb"></p>
+      </section>
+
+      <section class="card">
+        <h2>Verify a transaction</h2>
+        <div class="inputs">
+          <input id="tx" type="text" placeholder="transaction hash" spellcheck="false" autocomplete="off" />
+          <input id="signer" type="text" placeholder="signer account id" spellcheck="false" autocomplete="off" />
+        </div>
+        <div class="actions">
+          <button id="verify" class="primary" type="button">Verify</button>
+          <button id="example" class="ghost" type="button">Use a recent transaction</button>
+          <button id="head" class="ghost" type="button">Check the head only</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Verify contract storage</h2>
+        <p class="hint">
+          A trie proof binds the value to a state root: the endpoint cannot hand back different bytes
+          without breaking the path.
+        </p>
+        <div class="inputs">
+          <input id="account" type="text" placeholder="contract account id" spellcheck="false" autocomplete="off" value="mpc-prover-0_4_12.bridge.near" />
+          <input id="storage-key" type="text" placeholder="storage key (utf8)" spellcheck="false" autocomplete="off" value="STATE" />
+        </div>
+        <div class="actions">
+          <button id="verify-state" class="primary" type="button">Verify storage</button>
+        </div>
+      </section>
+
+      <section id="output" class="card output" hidden></section>
+
+      <footer>
+        <p>
+          Everything here runs in your browser: the proofs are checked against ed25519 signatures by
+          >2/3 of staked validators. Nothing is sent to a server of ours — there isn't one.
+        </p>
+      </footer>
+    </main>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

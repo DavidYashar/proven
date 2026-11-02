@@ -1,0 +1,367 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
+import { parseCheckpoint, type Checkpoint } from "./checkpoint.js";
+import { b58encode } from "./base58.js";
+import { authenticateBlockRoots, encodeInnerRest } from "./block-header.js";
+import { sha256 } from "./borsh.js";
+import { NearRpc } from "./rpc.js";
+import { verifyContractState } from "./state.js";
+import { resolveHead } from "./trust.js";
+import { verifyTransaction } from "./verifier.js";
+import { b58decode } from "./base58.js";
+import { equalBytes } from "./borsh.js";
+import { bytesToBase64, bytesToHex } from "./bytes.js";
+
+/**
+ * `proven proxy` — a drop-in NEAR JSON-RPC endpoint that verifies what it forwards.
+ *
+ * Point any existing client at it (one URL change) and get:
+ *   - `x-proven-verified: true|false|self` on every response
+ *   - `x-proven-trust: anchored|quorum|rpc-asserted`
+ *   - in `strict` mode, an error for methods that cannot be verified at all
+ *
+ * Nothing about the JSON-RPC payload changes, so near-api-js, plain `fetch`, and wallet code keep
+ * working. The proxy never signs, never holds keys, and has no server-side state beyond counters.
+ */
+export interface ProxyOptions {
+  /** Upstream RPC(s). Two or more enables quorum checking on heads. */
+  upstream: string | string[];
+  /** Pinned validator set; enables anchored verdicts. */
+  checkpoint?: Checkpoint;
+  /** Reject methods that cannot be verified instead of forwarding them. */
+  strict?: boolean;
+  /** Per-request upstream timeout. */
+  timeoutMs?: number;
+}
+
+export type Verdict = "true" | "self" | "false" | "unverified" | "rejected";
+
+export interface ProxyCounters {
+  requests: number;
+  verified: number;
+  selfConsistent: number;
+  failed: number;
+  rejected: number;
+}
+
+const VERIFIABLE_METHODS = ["tx", "EXPERIMENTAL_tx_status", "query (view_state + include_proof)", "block"];
+
+/** What kind of verification a request can support — classified per request, not per method name. */
+type Verifiability = "proof" | "self" | "none";
+
+function classify(method: string, params: any): Verifiability {
+  if (method === "tx" || method === "EXPERIMENTAL_tx_status") return "proof";
+  if (method === "query" && params?.request_type === "view_state" && params?.include_proof) return "proof";
+  if (method === "block") return "self";
+  return "none";
+}
+
+export interface ProvenProxy {
+  handler: (req: IncomingMessage, res: ServerResponse) => void;
+  listen: (port: number, host?: string) => Promise<Server>;
+  counters: ProxyCounters;
+}
+
+const CORS: Record<string, string> = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-headers": "content-type, accept",
+  "access-control-expose-headers": "x-proven-verified, x-proven-trust, x-proven-head, x-proven-method, x-proven-detail",
+};
+
+export function createProvenProxy(options: ProxyOptions): ProvenProxy {
+  const upstreams = (Array.isArray(options.upstream) ? options.upstream : [options.upstream]).filter(Boolean);
+  if (upstreams.length === 0) throw new Error("proxy needs at least one upstream RPC");
+  const rpcs = upstreams.map((url) => new NearRpc({ url, timeoutMs: options.timeoutMs ?? 15_000 }));
+
+  const counters: ProxyCounters = { requests: 0, verified: 0, selfConsistent: 0, failed: 0, rejected: 0 };
+  let preferred = 0;
+
+  const send = (res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) => {
+    res.writeHead(status, { "content-type": "application/json", ...CORS, ...headers });
+    res.end(typeof body === "string" ? body : JSON.stringify(body));
+  };
+
+  const rpcError = (id: unknown, code: number, message: string, data?: unknown) => ({
+    jsonrpc: "2.0",
+    id: id ?? null,
+    error: { code, message, ...(data === undefined ? {} : { data }) },
+  });
+
+  /** Compares the outcome the upstream reported with the one the proof committed to. */
+  function outcomesMatch(reported: any, proven: any): boolean {
+    if (!reported || !proven) return false;
+    if (reported.executor_id !== proven.executor_id) return false;
+    if (Number(reported.gas_burnt) !== Number(proven.gas_burnt)) return false;
+    if (String(reported.tokens_burnt) !== String(proven.tokens_burnt)) return false;
+    const reportedStatus = Object.keys(reported.status ?? {})[0];
+    const provenStatus = Object.keys(proven.status ?? {})[0];
+    if (reportedStatus !== provenStatus) return false;
+    if (reportedStatus === "SuccessValue" && reported.status.SuccessValue !== proven.status.SuccessValue) return false;
+    if (reportedStatus === "SuccessReceiptId" && reported.status.SuccessReceiptId !== proven.status.SuccessReceiptId) return false;
+    const a = (reported.receipt_ids ?? []).join(",");
+    const b = (proven.receipt_ids ?? []).join(",");
+    return a === b;
+  }
+
+  async function verify(method: string, params: any, result: any): Promise<{ verdict: Verdict; trust: string; detail: string }> {
+    if (method === "tx" || method === "EXPERIMENTAL_tx_status") {
+      const hash = params?.tx_hash;
+      const signer = params?.sender_account_id ?? params?.signer_account_id;
+      if (!hash || !signer) throw new Error("tx_status without tx_hash/sender_account_id cannot be verified");
+      const proven = await verifyTransaction(hash, signer, { rpcs, checkpoint: options.checkpoint });
+      const reported = result?.transaction_outcome?.outcome;
+      const matches = outcomesMatch(reported, proven.value.outcome);
+      const ok = proven.verified && matches;
+      return {
+        verdict: ok ? "true" : "false",
+        trust: proven.trust,
+        detail: ok
+          ? `${proven.value.height} · ${proven.head.approvedStakePercent}% stake`
+          : !proven.verified
+            ? `proof failed: ${proven.checks.find((c) => !c.ok)?.name ?? "unknown"}`
+            : "reported outcome does not match the proven outcome",
+      };
+    }
+
+    if (method === "query" && params?.request_type === "view_state" && params?.include_proof) {
+      const accountId = params.account_id;
+      const key = params.prefix_base64 ? Uint8Array.from(Buffer.from(params.prefix_base64, "base64")) : new Uint8Array();
+      const proven = await verifyContractState(accountId, key, { rpcs, checkpoint: options.checkpoint });
+      const reported = (result?.values ?? [])[0];
+      const matches = proven.value.value === null ? !reported : reported && bytesToBase64(proven.value.value) === reported.value;
+      const ok = proven.verified && matches;
+      return {
+        verdict: ok ? "true" : "false",
+        trust: proven.trust,
+        detail: ok ? `state root ${proven.value.stateRoot.slice(0, 12)}…` : "returned values do not match the trie proof",
+      };
+    }
+
+    if (method === "block") {
+      // Self-consistency: recompute the header hash from its own contents. Catches any edited field,
+      // though it cannot by itself prove the block belongs to the head.
+      const header = result?.header;
+      if (!header?.hash) throw new Error("block response has no header");
+      const innerLite = sha256(
+        (() => {
+          const l = header;
+          return Buffer.concat([
+            u64(l.height),
+            b58decode(l.epoch_id),
+            b58decode(l.next_epoch_id),
+            b58decode(l.prev_state_root),
+            b58decode(l.outcome_root),
+            u64(l.timestamp_nanosec ?? l.timestamp),
+            b58decode(l.next_bp_hash),
+            b58decode(l.block_merkle_root),
+          ]);
+        })(),
+      );
+      const innerRest = sha256(encodeInnerRest(header));
+      const computed = sha256(sha256(innerLite, innerRest), b58decode(header.prev_hash));
+      const ok = equalBytes(computed, b58decode(header.hash));
+      return {
+        verdict: ok ? "self" : "false",
+        trust: "self-consistent",
+        detail: ok ? `header hash recomputed (${bytesToHex(computed).slice(0, 12)}…)` : "header hash does not match its contents",
+      };
+    }
+
+    return { verdict: "unverified", trust: "none", detail: "method has no proof primitive" };
+  }
+
+  async function handleRpc(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const body = await readBody(req);
+    let request: any;
+    try {
+      request = JSON.parse(body);
+    } catch {
+      send(res, 400, rpcError(null, -32700, "parse error"));
+      return;
+    }
+    const method = request?.method;
+    const params = request?.params;
+    counters.requests++;
+
+    // Forward first: the proxy is on the hot path, so the upstream's latency stays in front.
+    // Extra upstreams are failover, and the last one that worked is tried first so a dead provider
+    // costs one failed call, not one per request.
+    let envelope: { result?: any; error?: any } | undefined;
+    const errors: string[] = [];
+    const order = [preferred, ...rpcs.map((_, i) => i)].filter((i, pos, all) => all.indexOf(i) === pos);
+    for (const index of order) {
+      try {
+        envelope = await rpcs[index].callEnvelope(method, params ?? {});
+        preferred = index;
+        break;
+      } catch (error) {
+        errors.push(`${rpcs[index].url}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (!envelope) {
+      send(res, 502, rpcError(request?.id, -32000, `upstream error: ${errors.join("; ")}`), { "x-proven-verified": "false" });
+      return;
+    }
+    if (envelope.error) {
+      // The node's own answer ("unknown block", "method not found") is forwarded verbatim: it is
+      // data the caller needs, not a proxy failure.
+      send(res, 200, { jsonrpc: "2.0", id: request?.id ?? null, error: envelope.error }, {
+        "x-proven-verified": "false",
+        "x-proven-trust": "none",
+        "x-proven-method": String(method),
+        "x-proven-detail": encodeURIComponent(String(envelope.error?.cause?.info?.error_message ?? envelope.error?.message ?? "upstream error")),
+      });
+      return;
+    }
+    const upstreamBody = envelope.result;
+
+    const verifiability = classify(method, params);
+    if (verifiability === "none") {
+      if (options.strict) {
+        counters.rejected++;
+        send(
+          res,
+          200,
+          rpcError(
+            request?.id,
+            -32001,
+            `proven proxy (strict): "${method}" cannot be verified, so it is refused`,
+            { verifiable: VERIFIABLE_METHODS },
+          ),
+          { "x-proven-verified": "rejected", "x-proven-method": String(method) },
+        );
+        return;
+      }
+      send(
+        res,
+        200,
+        { jsonrpc: "2.0", id: request?.id ?? null, result: upstreamBody },
+        { "x-proven-verified": "unverified", "x-proven-method": String(method) },
+      );
+      return;
+    }
+
+    let verdict: Verdict;
+    let trust = "none";
+    let detail = "";
+    try {
+      const verified = await verify(method, params, upstreamBody);
+      verdict = verified.verdict;
+      trust = verified.trust;
+      detail = verified.detail;
+    } catch (error) {
+      verdict = "false";
+      detail = error instanceof Error ? error.message : String(error);
+    }
+
+    if (verdict === "true") counters.verified++;
+    else if (verdict === "self") counters.selfConsistent++;
+    else counters.failed++;
+
+    const headers = {
+      "x-proven-verified": verdict,
+      "x-proven-trust": trust,
+      "x-proven-method": String(method),
+      "x-proven-detail": encodeURIComponent(detail),
+    };
+
+    if (verdict === "false") {
+      // Never hand back data that failed verification: that is the whole point of the proxy.
+      send(res, 200, rpcError(request?.id, -32002, `proven: verification failed — ${detail}`), headers);
+      return;
+    }
+    send(res, 200, { jsonrpc: "2.0", id: request?.id ?? null, result: upstreamBody }, headers);
+  }
+
+  async function handleStatus(res: ServerResponse): Promise<void> {
+    let head: unknown = null;
+    try {
+      const resolved = await resolveHead({ rpcs, checkpoint: options.checkpoint });
+      head = {
+        height: resolved.head.height,
+        trust: resolved.trust,
+        approvedStakePercent: resolved.head.approvedStakePercent,
+        validators: resolved.signers.length,
+      };
+    } catch (error) {
+      head = { error: error instanceof Error ? error.message : String(error) };
+    }
+    send(res, 200, {
+      service: "proven proxy",
+      upstream: upstreams,
+      active: upstreams[preferred],
+      strict: Boolean(options.strict),
+      checkpoint: options.checkpoint
+        ? { epochId: options.checkpoint.epochId, validators: options.checkpoint.validators.length, capturedAt: options.checkpoint.capturedAt }
+        : null,
+      verifiable: VERIFIABLE_METHODS,
+      head,
+      counters,
+    });
+  }
+
+  const handler = (req: IncomingMessage, res: ServerResponse): void => {
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, CORS);
+      res.end();
+      return;
+    }
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/status")) {
+      void handleStatus(res);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/health") {
+      send(res, 200, { ok: true, counters });
+      return;
+    }
+    if (req.method === "POST") {
+      void handleRpc(req, res).catch((error) => {
+        send(res, 500, rpcError(null, -32603, `internal error: ${error instanceof Error ? error.message : error}`));
+      });
+      return;
+    }
+    send(res, 404, { error: "POST JSON-RPC to /, GET / for status" });
+  };
+
+  return {
+    handler,
+    counters,
+    listen: (port, host = "0.0.0.0") =>
+      new Promise((resolve) => {
+        const server = createServer(handler);
+        server.listen(port, host, () => resolve(server));
+      }),
+  };
+}
+
+async function readBody(req: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 2_000_000) throw new Error("request body too large");
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function u64(n: number | string): Uint8Array {
+  const b = new Uint8Array(8);
+  new DataView(b.buffer).setBigUint64(0, BigInt(n), true);
+  return b;
+}
+
+/** Reads a checkpoint file when configured, ignoring a missing one. */
+export function loadCheckpoint(path: string | undefined): Checkpoint | undefined {
+  if (!path) return undefined;
+  try {
+    return parseCheckpoint(readFileSync(path, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+export { b58encode };

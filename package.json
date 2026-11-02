@@ -1,0 +1,59 @@
+{
+  "name": "proven",
+  "version": "0.1.0",
+  "description": "The NEAR RPC you don't have to trust: verify transaction, receipt and call results client-side against validator signatures.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "proven-proxy": "./dist/proxy-cli.js",
+    "proven": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "checkpoints"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./proxy": {
+      "types": "./dist/proxy.d.ts",
+      "import": "./dist/proxy.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "verify": "tsx src/cli.ts",
+    "test": "tsx tests/vectors.test.ts",
+    "test:attack": "tsx tests/forge-head.ts",
+    "test:live": "tsx tests/demo.ts",
+    "test:all": "npm test && npm run test:attack && npm run test:live",
+    "checkpoint": "tsx src/cli.ts checkpoint --out checkpoints/mainnet.json",
+    "fixtures": "tsx scripts/capture-fixtures.ts && tsx scripts/capture_state_fixture.ts",
+    "web:dev": "npm run build && vite --config web/vite.config.ts",
+    "web:build": "npm run build && vite build --config web/vite.config.ts",
+    "web:preview": "vite preview --config web/vite.config.ts",
+    "web:typecheck": "tsc --noEmit -p web/tsconfig.json",
+    "proxy": "tsx src/proxy-cli.ts",
+    "test:proxy": "tsx tests/proxy.test.ts"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.0.0",
+    "@noble/hashes": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vite": "^7.3.7"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
+
+

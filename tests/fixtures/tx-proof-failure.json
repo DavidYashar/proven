@@ -1,0 +1,131 @@
+{
+  "txHash": "8Ef8U2dR8srbDPpATjZzLpEFXAimNdzTCmh98rJSELQB",
+  "signer": "zorro7.near",
+  "headHash": "DMaoUqpz5eEkKST8hnZE1B1GbX2Aq7cQJsdKDbve9ajY",
+  "proof": {
+    "block_header_lite": {
+      "inner_lite": {
+        "block_merkle_root": "F4oKT8s99Mq5RFcNHEwBaSaFJuuBbVPN142mX2ywJ2n5",
+        "epoch_id": "gW2aCeaWewCmVCsSRRCsoAq8N1XXn4YMGkpab9eW2cg",
+        "height": 222756706,
+        "next_bp_hash": "2fneGu74Xrhuk9Y2GuPHmLQBqJAVCoGYvT427CGkCzUL",
+        "next_epoch_id": "4SNpeKx4gcsSo7yAZzucY9hQQ8dn9LDtpugXX73igGwy",
+        "outcome_root": "F8BFVnJcGDFpHz4JmMZA5ovZBH96EbPKNJqoPEKSiHd2",
+        "prev_state_root": "5HddnBEVeW2vZ3MNDiXQd8LKtB88DjdDkWb8jcTXz8hu",
+        "timestamp": 1793644407096617200,
+        "timestamp_nanosec": "1793644407096617232"
+      },
+      "inner_rest_hash": "Hr1t4RCkoc1VdESCGRgARsjRWfHJja3qHzmWDi15e6Hh",
+      "prev_block_hash": "HAJLFN1SVyCCszSz7yDe9Um4isZEEci1HkKUN6qbemVd"
+    },
+    "block_proof": [
+      {
+        "direction": "Right",
+        "hash": "Cvf56pfCdCrixk4zXjyrsBvH9kTnQs5qgkBCChwSarwk"
+      },
+      {
+        "direction": "Right",
+        "hash": "FJC95MgpX2NRyfhtDZRWZDbQkvMFNvRRYm4EFgN3FEJK"
+      },
+      {
+        "direction": "Left",
+        "hash": "2CqYY4gzfd2Jj9CVnj66kzzSWhwVB4KLk9vwAeR6LKpK"
+      },
+      {
+        "direction": "Right",
+        "hash": "3UAxbHeDJFA1zdziES7uUSmG1BQ4bt5EFjKAJo8fGGdo"
+      },
+      {
+        "direction": "Left",
+        "hash": "9gTsYm3YBscwNMWnjGPaWfhNKZgMaC4eegYGdui5q9Am"
+      },
+      {
+        "direction": "Left",
+        "hash": "Hr4Szpat7DF8XU9DUNJPo3fQQDUENmCPFuZbQEGDMNVz"
+      },
+      {
+        "direction": "Left",
+        "hash": "2e9z45PGz4seXdL5D5sxQEgxaEWqd4bKHUzUTXrTzvsN"
+      },
+      {
+        "direction": "Left",
+        "hash": "ALixX6GQgKNa5iBxkon1LmjKAKnfT3m21YbeowKL9yNm"
+      },
+      {
+        "direction": "Left",
+        "hash": "29XNqqWempY7YMPQdkkukmTX25PzgtsW43fSBMSp31vH"
+      },
+      {
+        "direction": "Left",
+        "hash": "F8MqMER3NkSYqpfdpzZKNdKhGBxFHscCUZVWosYS6e7B"
+      },
+      {
+        "direction": "Left",
+        "hash": "B9yJ7JTkej8cFRKoH8NToeY25hvQbWLtmRfZ7uEdKPgX"
+      },
+      {
+        "direction": "Left",
+        "hash": "7QaGQ3MsfdDFN7jMxNN8KFKtLchYdVE6owVk9VriCqv9"
+      },
+      {
+        "direction": "Left",
+        "hash": "BCeP4PL3KgdaMBepYGZEsVs711bsAx4x2GGiSMqabDJX"
+      },
+      {
+        "direction": "Left",
+        "hash": "E6QhAW1q6B9cNoPGpC71XYTqna4cM6uBt3CtYvepD5vB"
+      },
+      {
+        "direction": "Left",
+        "hash": "HJCyMAbvMZ4DLAFVWdTnBqJkpfXvwA1pdkc1xgXJAMSc"
+      },
+      {
+        "direction": "Left",
+        "hash": "6PP6jaSVAtUym4SkEeuyytRz9pDsDT8BVjoDt8u73Xv7"
+      },
+      {
+        "direction": "Left",
+        "hash": "7Hc1yHcrNoDqbEAp7HY8GpgAsCEybS4SwYA8JUmyFwZh"
+      }
+    ],
+    "outcome_proof": {
+      "block_hash": "r64F1Aaz7cdSTTqfJ4spKfyteE32FRMhicjEA25sxKN",
+      "id": "8Ef8U2dR8srbDPpATjZzLpEFXAimNdzTCmh98rJSELQB",
+      "outcome": {
+        "executor_id": "zorro7.near",
+        "gas_burnt": 315355108395,
+        "logs": [],
+        "metadata": {
+          "gas_profile": null,
+          "version": 1
+        },
+        "receipt_ids": [
+          "FZqZtBTP3cWmgRBBJmqzzc7mbZ58JeeSsqgn178AScSC"
+        ],
+        "status": {
+          "SuccessReceiptId": "FZqZtBTP3cWmgRBBJmqzzc7mbZ58JeeSsqgn178AScSC"
+        },
+        "tokens_burnt": "31535510839500000000"
+      },
+      "proof": [
+        {
+          "direction": "Left",
+          "hash": "HBvPbkD58Vth2R7MiJz4ocrx6ESViDJLvuk7H69qSbN9"
+        }
+      ]
+    },
+    "outcome_root_proof": [
+      {
+        "direction": "Left",
+        "hash": "5GV6aMYE9LjaqAxknnrVYAU5rxMAvtQGT1qHXYx9GZXt"
+      },
+      {
+        "direction": "Left",
+        "hash": "3D3JCBonwLqbKUnY3PZpiiKYeRwBavnpRwTQNXK3RGSP"
+      }
+    ]
+  },
+  "status": {
+    "SuccessReceiptId": "FZqZtBTP3cWmgRBBJmqzzc7mbZ58JeeSsqgn178AScSC"
+  }
+}

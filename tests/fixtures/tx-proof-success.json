@@ -1,0 +1,74 @@
+{
+  "txHash": "5StTpDWYVjTMYDV96pFbyumF7qqzACCKmDSLunnYHc4c",
+  "signer": "karasvp.tg",
+  "headHash": "DMaoUqpz5eEkKST8hnZE1B1GbX2Aq7cQJsdKDbve9ajY",
+  "proof": {
+    "block_header_lite": {
+      "inner_lite": {
+        "block_merkle_root": "8stkCvaTNZJ1iah1oSA8baTiXiRUo6FW6kckE1RRTMXA",
+        "epoch_id": "gW2aCeaWewCmVCsSRRCsoAq8N1XXn4YMGkpab9eW2cg",
+        "height": 222756711,
+        "next_bp_hash": "2fneGu74Xrhuk9Y2GuPHmLQBqJAVCoGYvT427CGkCzUL",
+        "next_epoch_id": "4SNpeKx4gcsSo7yAZzucY9hQQ8dn9LDtpugXX73igGwy",
+        "outcome_root": "GECYkEMayEKvv1dEgMgJUMeZZTjvp5MpZ6mDapmeAnai",
+        "prev_state_root": "DnnCiTKuZoFrntR4Xvt5j4JiTwQasava6ErrMaU43Jn1",
+        "timestamp": 1793644410173516000,
+        "timestamp_nanosec": "1793644410173516026"
+      },
+      "inner_rest_hash": "GyWc8MzMifunJUoi43tKE26pXYw98qkXiiBpYJfaBkfn",
+      "prev_block_hash": "3UAxbHeDJFA1zdziES7uUSmG1BQ4bt5EFjKAJo8fGGdo"
+    },
+    "block_proof": [],
+    "outcome_proof": {
+      "block_hash": "DMaoUqpz5eEkKST8hnZE1B1GbX2Aq7cQJsdKDbve9ajY",
+      "id": "5StTpDWYVjTMYDV96pFbyumF7qqzACCKmDSLunnYHc4c",
+      "outcome": {
+        "executor_id": "karasvp.tg",
+        "gas_burnt": 315974996690,
+        "logs": [],
+        "metadata": {
+          "gas_profile": null,
+          "version": 1
+        },
+        "receipt_ids": [
+          "6urTrFRLiirHoZBFPwq3KKNCKvibSGKeh5FZtfncpYSA"
+        ],
+        "status": {
+          "SuccessReceiptId": "6urTrFRLiirHoZBFPwq3KKNCKvibSGKeh5FZtfncpYSA"
+        },
+        "tokens_burnt": "31597499669000000000"
+      },
+      "proof": [
+        {
+          "direction": "Left",
+          "hash": "4EPY7K7Dm69H5PvCtgCAv9Gt67MvkyabK7wFdmbeu6xn"
+        },
+        {
+          "direction": "Right",
+          "hash": "DY4ro5dBPuGzbvoLfiE438FY87brdZZANAC564sDDBdA"
+        }
+      ]
+    },
+    "outcome_root_proof": [
+      {
+        "direction": "Right",
+        "hash": "AaztZTRjmwQKgNSJh3C2GKphhZJkpFAgiUaeQcN7kCoo"
+      },
+      {
+        "direction": "Left",
+        "hash": "2xCBp8hrq4tAbpnhSK4Q4dsez1YyWgrNrqSkcPKPC9PA"
+      },
+      {
+        "direction": "Left",
+        "hash": "9zCtRmD2VPa2sh1F7MhMzgnLCziLMMBkfCknRRu6UrZz"
+      },
+      {
+        "direction": "Right",
+        "hash": "4A9zZ1umpi36rXiuaKYJZgAjhUH9WoTrnSBXtA3wMdV2"
+      }
+    ]
+  },
+  "status": {
+    "SuccessReceiptId": "6urTrFRLiirHoZBFPwq3KKNCKvibSGKeh5FZtfncpYSA"
+  }
+}

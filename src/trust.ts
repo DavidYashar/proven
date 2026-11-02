@@ -1,0 +1,254 @@
+import { checkpointMismatch, type Checkpoint } from "./checkpoint.js";
+import { verifyLightClientBlock } from "./light-client.js";
+import { NearRpc } from "./rpc.js";
+import { b58encode } from "./base58.js";
+import type {
+  Check,
+  LightClientBlockView,
+  TrustLevel,
+  ValidatorStake,
+  VerifiedLightClientHead,
+} from "./types.js";
+
+/**
+ * How much the verdict can be trusted:
+ *
+ * - `anchored`   — approvals verified against a **pinned** validator set (or a chain of sets
+ *                  descending from one). A hostile RPC would need >2/3 of real stake to lie.
+ * - `quorum`     — several independent RPCs returned byte-identical light client blocks, and
+ *                  approvals were verified against the set they agree on. Safe unless every
+ *                  provider colludes.
+ * - `rpc-asserted` — one RPC supplied both the head and the validator set: the data is internally
+ *                  consistent, but a malicious endpoint could have invented the whole chain.
+ */
+
+export interface ResolveHeadOptions {
+  /** One or more RPC endpoints. Two or more enables `quorum`. */
+  rpcs: Array<string | NearRpc>;
+  /** Pinned checkpoint; enables `anchored`. */
+  checkpoint?: Checkpoint;
+  /** Fail instead of falling back when the checkpoint does not apply. */
+  requireAnchor?: boolean;
+  /** How far behind the final head to anchor the request. */
+  anchorDepth?: number;
+}
+
+export interface ResolvedHead {
+  head: VerifiedLightClientHead;
+  view: LightClientBlockView;
+  trust: TrustLevel;
+  signers: ValidatorStake[];
+  /** Where the signer set came from — shown to the user, because it is the whole trust argument. */
+  signerSource: string;
+  checks: Check[];
+  /** Non-fatal remarks (e.g. "checkpoint is stale, fell back to quorum"). */
+  notes: string[];
+}
+
+const asRpc = (rpc: string | NearRpc): NearRpc => (rpc instanceof NearRpc ? rpc : new NearRpc(rpc));
+
+/** NEAR epochs are 43,200 blocks (~12h at 1s/block). */
+const EPOCH_BLOCKS = 43_200;
+
+/**
+ * The keys that sign a block in epoch `targetEpochId` are the `next_bps` of a view from the
+ * **previous** epoch — `next_bps` is the set for the epoch *after* the view's own.
+ *
+ * A fresh client has no previous view, and `next_light_client_block` never steps back one epoch at
+ * a time (it returns the latest view, or one as much as ~60k blocks past the anchor). So probe
+ * anchors across the previous epoch and steer by the epoch ids the views report. Every candidate is
+ * checked cryptographically afterwards, so a wrong guess can only cost a failed verification —
+ * never a false accept.
+ */
+export async function fetchSignerSet(
+  rpc: NearRpc,
+  targetEpochId: string,
+  referenceHeight: number,
+): Promise<ValidatorStake[] | null> {
+  const step = EPOCH_BLOCKS / 2;
+  let depth = EPOCH_BLOCKS + 59_000;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      const anchor = await rpc.block(Math.max(1, referenceHeight - depth));
+      const view = (await rpc.nextLightClientBlock(anchor.header.hash)) as LightClientBlockView | null;
+      if (view?.inner_lite && view.next_bps?.length) {
+        if (view.inner_lite.next_epoch_id === targetEpochId) return view.next_bps;
+        // In the target epoch → its next_bps is one too new. Older than the previous epoch → come forward.
+        depth = view.inner_lite.epoch_id === targetEpochId ? depth + step : Math.max(step, depth - step);
+      } else {
+        depth += step;
+      }
+    } catch {
+      depth += step;
+    }
+  }
+  return null;
+}
+
+/** Fetches a light client block, preferring one whose block is already final. */
+export async function fetchLightClientBlock(rpc: NearRpc, anchorDepth = 3): Promise<LightClientBlockView> {
+  let lastError: Error | undefined;
+  let best: LightClientBlockView | undefined;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      const final = await rpc.finalBlock();
+      const finalHeight = Number(final.header.height);
+      const anchorHeight = Math.max(1, finalHeight - anchorDepth);
+      const anchor = await rpc.block(anchorHeight);
+      const view = (await rpc.nextLightClientBlock(anchor.header.hash)) as LightClientBlockView | null;
+      if (!view?.inner_lite) {
+        lastError = new Error("RPC returned no light client block (node may still be syncing)");
+      } else if (Number(view.inner_lite.height) <= finalHeight) {
+        return view;
+      } else {
+        // The node offered a block a little past the head it reports as final. Nodes disagree about
+        // where finality sits by a block or two; wait briefly, then accept it — the approvals in the
+        // view are what authenticate it, and the caller still checks it is the canonical block.
+        best = view;
+        lastError = new Error(
+          `light client block ${view.inner_lite.height} is ahead of the final head ${finalHeight}`,
+        );
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+    if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 1200));
+  }
+  if (best) return best;
+  throw lastError ?? new Error("could not obtain a light client block");
+}
+
+/** Fingerprint of the fields that define a light client block, for cross-provider comparison. */
+const fingerprint = (view: LightClientBlockView): string =>
+  JSON.stringify([view.inner_lite, view.inner_rest_hash, view.prev_block_hash, view.next_bps]);
+
+export async function resolveHead(options: ResolveHeadOptions): Promise<ResolvedHead> {
+  if (!options.rpcs?.length) throw new Error("resolveHead needs at least one RPC");
+  const rpcs = options.rpcs.map(asRpc);
+  const settled = await Promise.allSettled(
+    rpcs.map((rpc) => fetchLightClientBlock(rpc, options.anchorDepth ?? 3)),
+  );
+
+  const notes: string[] = [];
+  const checks: Check[] = [];
+
+  const views: LightClientBlockView[] = [];
+  settled.forEach((result, index) => {
+    if (result.status === "fulfilled") {
+      views.push(result.value);
+    } else {
+      const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      notes.push(`${rpcs[index].url} did not serve a light client block: ${reason}`);
+    }
+  });
+  if (views.length === 0) {
+    throw new Error(`no RPC could serve a light client block (${notes.join("; ")})`);
+  }
+
+  // 1. Providers can legitimately be a block apart, so compare only views that claim the same
+  //    height: two different descriptions of one height is a contradiction, timing skew is not.
+  let quorum = false;
+  if (views.length > 1) {
+    const byHeight = new Map<number, LightClientBlockView[]>();
+    for (const view of views) {
+      const height = Number(view.inner_lite.height);
+      byHeight.set(height, [...(byHeight.get(height) ?? []), view]);
+    }
+    const comparable = [...byHeight.values()].filter((group) => group.length > 1);
+    if (comparable.length === 0) {
+      notes.push(
+        `providers are at different heights (${[...byHeight.keys()].sort((a, b) => a - b).join(", ")}); quorum not established`,
+      );
+    } else {
+      const contradictions = comparable.filter(
+        (group) => group.some((view) => fingerprint(view) !== fingerprint(group[0])),
+      ).length;
+      quorum = contradictions === 0;
+      checks.push({
+        name: "independent RPCs agree on the same light client block",
+        ok: quorum,
+        detail: quorum
+          ? `${comparable[0].length} providers at height ${comparable[0][0].inner_lite.height}`
+          : `${contradictions} contradiction(s) — at least one provider is lying`,
+      });
+    }
+  }
+
+  const view = views[0];
+  const rpcValidators = view.next_bps ?? [];
+  const epochId = view.inner_lite.epoch_id;
+
+  // 2. Decide which validator set is allowed to authenticate this head.
+  let signers: ValidatorStake[] | null = null;
+  let signerSource = "";
+  let trust: TrustLevel = quorum ? "quorum" : "rpc-asserted";
+
+  if (options.checkpoint) {
+    const mismatch = checkpointMismatch(options.checkpoint, view);
+    if (mismatch === null) {
+      signers = options.checkpoint.validators;
+      signerSource = "pinned checkpoint";
+      trust = "anchored";
+      checks.push({
+        name: "checkpoint applies to this head",
+        ok: true,
+        detail: `epoch ${epochId.slice(0, 8)}…, ${signers.length} pinned producers`,
+      });
+    } else if (options.requireAnchor) {
+      checks.push({ name: "checkpoint applies to this head", ok: false, detail: mismatch });
+    } else {
+      notes.push(`${mismatch} — falling back to ${trust}`);
+    }
+  } else if (options.requireAnchor) {
+    checks.push({ name: "checkpoint applies to this head", ok: false, detail: "no checkpoint supplied" });
+  }
+
+  if (!signers) {
+    // No usable pin: fetch the set that actually signed this epoch rather than trusting the one the
+    // response carries (`view.next_bps` belongs to the *next* epoch, so verifying against it silently
+    // drops every validator whose position moved at the boundary).
+    const fetched = await fetchSignerSet(rpcs[0], epochId, Number(view.inner_lite.height)).catch(() => null);
+    if (fetched) {
+      signers = fetched;
+      signerSource = "previous epoch's producer set, fetched from the chain";
+    } else {
+      signers = rpcValidators;
+      signerSource = "the response's own next_bps (approximate — one epoch ahead)";
+      notes.push(
+        "could not obtain the producer set that signed this epoch; approvals were checked against the next epoch's set, so the approved stake is under-counted",
+      );
+    }
+  }
+
+  // 3. Verify the head with the chosen signer set.
+  const head = verifyLightClientBlock(view, { validators: signers });
+  checks.push(...head.checks);
+
+  // 4. Sanity: the block we verified is the canonical block at its height. Any provider may answer
+  // — the comparison is against the hash we already verified, so a lie here shows up as a mismatch.
+  const canonicalErrors: string[] = [];
+  let canonicalHash: string | null = null;
+  for (const rpc of rpcs) {
+    try {
+      canonicalHash = (await rpc.block(head.height)).header.hash;
+      break;
+    } catch (error) {
+      canonicalErrors.push(`${rpc.url}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  checks.push(
+    canonicalHash === null
+      ? {
+          name: "verified head is the canonical block at its height",
+          ok: false,
+          detail: `no RPC served block ${head.height} (${canonicalErrors.join("; ")})`,
+        }
+      : {
+          name: "verified head is the canonical block at its height",
+          ok: canonicalHash === b58encode(head.blockHash),
+          detail: `height ${head.height}`,
+        },
+  );
+
+  return { head, view, trust, signers, signerSource, checks, notes };
+}
