@@ -1,11 +1,10 @@
 import {
   NearRpc,
   verifyContractState,
-  b58encode,
   decodeSuccessValue,
+  makeCheckpoint,
   parseCheckpoint,
   resolveHead,
-  validatorsHash,
   verifyTransaction,
   type Check,
   type Checkpoint,
@@ -285,19 +284,11 @@ async function repin(): Promise<void> {
   if (busy) return;
   setBusy(true);
   try {
-    // Trust-on-first-use: adopt the validator set this endpoint reports right now.
-    const resolved = await resolveHead({ rpcs: [new NearRpc(el.rpc.value.trim())] });
-    checkpoint = {
-      network: "mainnet",
-      epochId: resolved.view.inner_lite.epoch_id,
-      nextEpochId: resolved.view.inner_lite.next_epoch_id,
-      height: resolved.head.height,
-      blockHash: b58encode(resolved.head.blockHash),
-      validators: resolved.signers,
-      validatorsHash: validatorsHash(resolved.signers),
-      capturedAt: new Date().toISOString(),
-      sourceRpc: el.rpc.value.trim(),
-    };
+    // Trust-on-first-use: adopt the producer set this endpoint reports right now. It is the set that
+    // signs this epoch, so it keeps working until the epoch turns over.
+    const rpcUrl = el.rpc.value.trim();
+    const resolved = await resolveHead({ rpcs: [new NearRpc(rpcUrl)] });
+    checkpoint = makeCheckpoint(resolved.view, resolved.signers, { network: "mainnet", sourceRpc: rpcUrl });
     saveCheckpoint(checkpoint);
     await refreshCheckpointStatus();
     el.output.hidden = true;
