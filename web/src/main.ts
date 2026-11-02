@@ -65,9 +65,9 @@ const esc = (s: unknown): string =>
   String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
 const TRUST_TEXT: Record<TrustLevel, string> = {
-  anchored: "anchored Â· pinned validator set",
-  quorum: "quorum Â· independent RPCs agree",
-  "rpc-asserted": "rpc-asserted Â· self-consistent only",
+  anchored: "anchored · pinned validator set",
+  quorum: "quorum · independent RPCs agree",
+  "rpc-asserted": "rpc-asserted · self-consistent only",
 };
 
 function setBadge(trust: TrustLevel | "idle" | "failed", ok = true): void {
@@ -81,7 +81,7 @@ function renderChecks(checks: Check[]): string {
   return `<ul class="checks">${checks
     .map(
       (c) => `<li data-ok="${c.ok}">
-        <span class="mark">${c.ok ? "âœ“" : "âœ—"}</span>
+        <span class="mark">${c.ok ? "✓" : "✗"}</span>
         <span><span class="name">${esc(c.name)}</span>${
           c.detail ? `<br /><span class="detail">${esc(c.detail)}</span>` : ""
         }</span>
@@ -98,7 +98,7 @@ function renderResult<T>(title: string, result: ProvenResult<T>, extra: Record<s
     <p class="verdict" data-ok="${result.verified}">${result.verified ? "VERIFIED" : "REJECTED"}</p>
     <div class="meta">
       <span class="k">trust</span><span class="v">${esc(TRUST_TEXT[result.trust])}</span>
-      <span class="k">light client head</span><span class="v">${result.head.height} Â· ${result.head.approvedStakePercent}% of staked NEAR signed</span>
+      <span class="k">light client head</span><span class="v">${result.head.height} · ${result.head.approvedStakePercent}% of staked NEAR signed</span>
       ${Object.entries(extra)
         .map(([k, v]) => `<span class="k">${esc(k)}</span><span class="v">${esc(v)}</span>`)
         .join("")}
@@ -119,7 +119,7 @@ function renderHeadOnly(resolved: Awaited<ReturnType<typeof resolveHead>>): void
       <span class="k">trust</span><span class="v">${esc(TRUST_TEXT[resolved.trust])}</span>
       <span class="k">height</span><span class="v">${resolved.head.height}</span>
       <span class="k">epoch</span><span class="v">${esc(resolved.view.inner_lite.epoch_id)}</span>
-      <span class="k">signed stake</span><span class="v">${resolved.head.approvedStakePercent}% Â· ${resolved.head.signatureCount} validators</span>
+      <span class="k">signed stake</span><span class="v">${resolved.head.approvedStakePercent}% · ${resolved.head.signatureCount} validators</span>
     </div>
     ${renderChecks(resolved.checks)}
     ${resolved.notes.length ? `<div class="note">${resolved.notes.map(esc).join("<br />")}</div>` : ""}
@@ -138,7 +138,7 @@ function setBusy(value: boolean): void {
   for (const button of [el.verify, el.example, el.head, el.repin, el.verifyState]) button.disabled = value;
   if (value) {
     el.output.hidden = false;
-    el.output.innerHTML = `<p class="verdict" data-ok="true"><span class="spinner"></span> verifyingâ€¦</p>`;
+    el.output.innerHTML = `<p class="verdict" data-ok="true"><span class="spinner"></span> verifying…</p>`;
   }
 }
 
@@ -189,7 +189,7 @@ async function runVerify(): Promise<void> {
   try {
     if (currentLie() === "forge") {
       throw new Error(
-        "a forged validator set has no real proofs to serve â€” use â€œCheck the head onlyâ€ to see this attack",
+        "a forged validator set has no real proofs to serve — use “Check the head only” to see this attack",
       );
     }
     const result = await verifyTransaction(hash, signer, { rpc: rpc(), ...trustOptions() });
@@ -201,7 +201,7 @@ async function runVerify(): Promise<void> {
     };
     const value = decodeSuccessValue(outcome);
     if (value !== null) extra["return value"] = value;
-    renderResult(`transaction ${hash.slice(0, 16)}â€¦`, result, extra);
+    renderResult(`transaction ${hash.slice(0, 16)}…`, result, extra);
   } catch (error) {
     renderError(error instanceof Error ? error.message : String(error));
   } finally {
@@ -232,7 +232,7 @@ async function runState(): Promise<void> {
         <span class="k">trust</span><span class="v">${esc(TRUST_TEXT[result.trust])}</span>
         <span class="k">value</span><span class="v">${esc(result.value.valueText ?? "(absent)")}</span>
         <span class="k">state root</span><span class="v">${esc(result.value.stateRoot)}</span>
-        <span class="k">shard</span><span class="v">${result.value.shard ?? "not located"} Â· block ${result.value.rootBlockHeight}</span>
+        <span class="k">shard</span><span class="v">${result.value.shard ?? "not located"} · block ${result.value.rootBlockHeight}</span>
       </div>
       ${renderChecks(result.checks)}
       ${notes.length ? `<div class="note">${notes.map(esc).join("<br />")}</div>` : ""}

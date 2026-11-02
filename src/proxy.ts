@@ -1,14 +1,14 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
-import { parseCheckpoint, type Checkpoint } from "./checkpoint.js";
+import { makeCheckpoint, parseCheckpoint, type Checkpoint } from "./checkpoint.js";
 import { b58encode } from "./base58.js";
 import { authenticateBlockRoots, encodeInnerRest } from "./block-header.js";
 import { sha256 } from "./borsh.js";
 import { NearRpc } from "./rpc.js";
 import { verifyContractState } from "./state.js";
 import { resolveHead, type ResolvedHead } from "./trust.js";
-import { verifyTransaction } from "./verifier.js";
+import { verifyTransaction, verifyReceipt } from "./verifier.js";
 import { b58decode } from "./base58.js";
 import { equalBytes } from "./borsh.js";
 import { bytesToBase64, bytesToHex } from "./bytes.js";
@@ -33,6 +33,11 @@ export interface ProxyOptions {
   strict?: boolean;
   /** Per-request upstream timeout. */
   timeoutMs?: number;
+  /**
+   * Called when the pin advances to the next epoch. A deployment can persist it, so a restart does
+   * not fall back to a pin that expired while the process was down.
+   */
+  onRolled?: (checkpoint: Checkpoint) => void;
 }
 
 export type Verdict = "true" | "self" | "false" | "unverified" | "rejected";
@@ -52,9 +57,25 @@ type Verifiability = "proof" | "self" | "none";
 
 function classify(method: string, params: any): Verifiability {
   if (method === "tx" || method === "EXPERIMENTAL_tx_status") return "proof";
-  if (method === "query" && params?.request_type === "view_state" && params?.include_proof) return "proof";
+  // Only an exact-key read can be checked: a prefix query returns a range of values that one trie
+  // path does not commit to, and a specific `block_id` is a height we are not querying.
+  if (
+    method === "query" &&
+    params?.request_type === "view_state" &&
+    params?.include_proof &&
+    params?.prefix_base64 &&
+    params?.block_id === undefined
+  ) {
+    return "proof";
+  }
   if (method === "block") return "self";
   return "none";
+}
+
+/** `tx` accepts positional params (`[hash, signer]`); normalise before reading fields. */
+function txParams(params: any): { hash?: string; signer?: string } {
+  if (Array.isArray(params)) return { hash: params[0], signer: params[1] };
+  return { hash: params?.tx_hash, signer: params?.sender_account_id ?? params?.signer_account_id };
 }
 
 export interface ProvenProxy {
@@ -67,7 +88,8 @@ const CORS: Record<string, string> = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
   "access-control-allow-headers": "content-type, accept",
-  "access-control-expose-headers": "x-proven-verified, x-proven-trust, x-proven-head, x-proven-method, x-proven-detail",
+  "access-control-expose-headers":
+    "x-proven-verified, x-proven-trust, x-proven-head, x-proven-method, x-proven-detail, x-proven-scope",
 };
 
 export function createProvenProxy(options: ProxyOptions): ProvenProxy {
@@ -114,11 +136,43 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
   const HEAD_TTL_MS = 5_000;
   let cachedHead: { at: number; resolved: ResolvedHead } | null = null;
   let headInFlight: Promise<ResolvedHead> | null = null;
+  // The pin in force, and the one this process has already authenticated for the *next* epoch. The
+  // next set is learned from the header the pinned validators signed, so adopting it later costs no
+  // trust — but it must only be promoted once the head is actually inside its epoch, never before.
+  let activeCheckpoint = options.checkpoint;
+  let nextCheckpoint: Checkpoint | undefined;
+
+  async function resolveWithPins(): Promise<ResolvedHead> {
+    let resolved = await resolveHead({ rpcs, checkpoint: activeCheckpoint });
+
+    // The epoch may have turned while this process was running: if the head is now in the epoch the
+    // stashed set belongs to, verify with it instead of downgrading.
+    if (nextCheckpoint && resolved.view.inner_lite.epoch_id === nextCheckpoint.epochId) {
+      const promoted = await resolveHead({ rpcs, checkpoint: nextCheckpoint });
+      if (promoted.trust === "anchored") {
+        activeCheckpoint = nextCheckpoint;
+        nextCheckpoint = undefined;
+        resolved = promoted;
+        console.log(
+          `proven: pin advanced to epoch ${activeCheckpoint.epochId.slice(0, 8)}… (${activeCheckpoint.validators.length} producers) — anchored without re-pinning`,
+        );
+        options.onRolled?.(activeCheckpoint);
+      }
+    }
+
+    if (resolved.nextPin) {
+      nextCheckpoint = makeCheckpoint(resolved.view, resolved.nextPin.validators, {
+        network: activeCheckpoint?.network ?? "mainnet",
+        sourceRpc: activeCheckpoint?.sourceRpc,
+      });
+    }
+    return resolved;
+  }
 
   async function head(force = false): Promise<ResolvedHead> {
     if (!force && cachedHead && Date.now() - cachedHead.at < HEAD_TTL_MS) return cachedHead.resolved;
     if (!headInFlight) {
-      headInFlight = resolveHead({ rpcs, checkpoint: options.checkpoint })
+      headInFlight = resolveWithPins()
         .then((resolved) => {
           cachedHead = { at: Date.now(), resolved };
           return resolved;
@@ -130,29 +184,66 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
     return headInFlight;
   }
 
-  async function verify(method: string, params: any, result: any): Promise<{ verdict: Verdict; trust: string; detail: string }> {
+  async function verify(
+    method: string,
+    params: any,
+    result: any,
+  ): Promise<{ verdict: Verdict; trust: string; detail: string; scope?: string }> {
     if (method === "tx" || method === "EXPERIMENTAL_tx_status") {
-      const hash = params?.tx_hash;
-      const signer = params?.sender_account_id ?? params?.signer_account_id;
-      if (!hash || !signer) throw new Error("tx_status without tx_hash/sender_account_id cannot be verified");
-      const run = (resolvedHead: ResolvedHead) =>
-        verifyTransaction(hash, signer, { rpcs, checkpoint: options.checkpoint, resolvedHead });
+      const { hash, signer } = txParams(params);
+      if (!hash || !signer) throw new Error("tx_status without a transaction hash and signer cannot be verified");
+      const resolvedHead = await head();
+      const run = (at: ResolvedHead) =>
+        verifyTransaction(hash, signer, { rpcs, checkpoint: activeCheckpoint, resolvedHead: at });
       // A cached head can age out of the proof window; retry once against a fresh one.
-      const proven = await run(await head()).catch(async (error) => {
+      const proven = await run(resolvedHead).catch(async (error) => {
         if (!cachedHead) throw error;
         return run(await head(true));
       });
       const reported = result?.transaction_outcome?.outcome;
-      const matches = outcomesMatch(reported, proven.value.outcome);
-      const ok = proven.verified && matches;
+      if (!proven.verified || !outcomesMatch(reported, proven.value.outcome)) {
+        return {
+          verdict: "false",
+          trust: proven.trust,
+          detail: proven.verified
+            ? "reported transaction outcome does not match the proven outcome"
+            : `proof failed: ${proven.checks.find((c) => !c.ok)?.name ?? "unknown"}`,
+          scope: "transaction_outcome",
+        };
+      }
+
+      // The transaction outcome is only half the answer: `status` and `receipts_outcome` — where the
+      // result of a contract call actually lives — come from the last receipt, so prove that too.
+      const receipts: any[] = result?.receipts_outcome ?? [];
+      let scope = "transaction_outcome";
+      if (receipts.length > 0) {
+        const last = receipts[receipts.length - 1];
+        const receiptId = last?.id;
+        const receiverId = last?.outcome?.executor_id;
+        if (!receiptId || !receiverId) throw new Error("receipt without id/executor cannot be verified");
+        const receiptProof = await verifyReceipt(receiptId, receiverId, {
+          rpcs,
+          checkpoint: activeCheckpoint,
+          resolvedHead: await head(),
+        });
+        if (!receiptProof.verified || !outcomesMatch(last.outcome, receiptProof.value.outcome)) {
+          return {
+            verdict: "false",
+            trust: receiptProof.trust,
+            detail: receiptProof.verified
+              ? `receipt ${receiptId.slice(0, 8)}… does not match its proof`
+              : `receipt proof failed: ${receiptProof.checks.find((c) => !c.ok)?.name ?? "unknown"}`,
+            scope: "transaction_outcome+receipt",
+          };
+        }
+        scope = receipts.length === 1 ? "transaction_outcome+receipt" : `transaction_outcome+last_of_${receipts.length}_receipts`;
+      }
+
       return {
-        verdict: ok ? "true" : "false",
+        verdict: "true",
         trust: proven.trust,
-        detail: ok
-          ? `${proven.value.height} · ${proven.head.approvedStakePercent}% stake`
-          : !proven.verified
-            ? `proof failed: ${proven.checks.find((c) => !c.ok)?.name ?? "unknown"}`
-            : "reported outcome does not match the proven outcome",
+        detail: `${proven.value.height} · ${proven.head.approvedStakePercent}% stake`,
+        scope,
       };
     }
 
@@ -160,7 +251,7 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
       const accountId = params.account_id;
       const key = params.prefix_base64 ? Uint8Array.from(Buffer.from(params.prefix_base64, "base64")) : new Uint8Array();
       const run = (resolvedHead: ResolvedHead) =>
-        verifyContractState(accountId, key, { rpcs, checkpoint: options.checkpoint, resolvedHead });
+        verifyContractState(accountId, key, { rpcs, checkpoint: activeCheckpoint, resolvedHead });
       const proven = await run(await head()).catch(async (error) => {
         if (!cachedHead) throw error;
         return run(await head(true));
@@ -180,23 +271,35 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
       // though it cannot by itself prove the block belongs to the head.
       const header = result?.header;
       if (!header?.hash) throw new Error("block response has no header");
-      const innerLite = sha256(
-        (() => {
-          const l = header;
-          return Buffer.concat([
-            u64(l.height),
-            b58decode(l.epoch_id),
-            b58decode(l.next_epoch_id),
-            b58decode(l.prev_state_root),
-            b58decode(l.outcome_root),
-            u64(l.timestamp_nanosec ?? l.timestamp),
-            b58decode(l.next_bp_hash),
-            b58decode(l.block_merkle_root),
-          ]);
-        })(),
-      );
-      const innerRest = sha256(encodeInnerRest(header));
-      const computed = sha256(sha256(innerLite, innerRest), b58decode(header.prev_hash));
+      let computed: Uint8Array;
+      try {
+        const innerLite = sha256(
+          (() => {
+            const l = header;
+            return Buffer.concat([
+              u64(l.height),
+              b58decode(l.epoch_id),
+              b58decode(l.next_epoch_id),
+              b58decode(l.prev_state_root),
+              b58decode(l.outcome_root),
+              u64(l.timestamp_nanosec ?? l.timestamp),
+              b58decode(l.next_bp_hash),
+              b58decode(l.block_merkle_root),
+            ]);
+          })(),
+        );
+        const innerRest = sha256(encodeInnerRest(header));
+        computed = sha256(sha256(innerLite, innerRest), b58decode(header.prev_hash));
+      } catch (error) {
+        // A protocol bump can add a header field this build does not encode. That is a limit of the
+        // verifier, not evidence the answer is a lie: say "unverified" rather than refusing the call,
+        // otherwise every `block` request breaks the day the layout changes.
+        return {
+          verdict: "unverified",
+          trust: "none",
+          detail: `header layout not supported by this build (${error instanceof Error ? error.message : String(error)})`,
+        };
+      }
       const ok = equalBytes(computed, b58decode(header.hash));
       return {
         verdict: ok ? "self" : "false",
@@ -282,11 +385,13 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
     let verdict: Verdict;
     let trust = "none";
     let detail = "";
+    let scope = "";
     try {
       const verified = await verify(method, params, upstreamBody);
       verdict = verified.verdict;
       trust = verified.trust;
       detail = verified.detail;
+      scope = verified.scope ?? "";
     } catch (error) {
       verdict = "false";
       detail = error instanceof Error ? error.message : String(error);
@@ -301,6 +406,7 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
       "x-proven-trust": trust,
       "x-proven-method": String(method),
       "x-proven-detail": encodeURIComponent(detail),
+      ...(scope ? { "x-proven-scope": scope } : {}),
     };
 
     if (verdict === "false") {
@@ -312,28 +418,36 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
   }
 
   async function handleStatus(res: ServerResponse): Promise<void> {
-    let head: unknown = null;
+    let headInfo: unknown = null;
     try {
-      const resolved = await resolveHead({ rpcs, checkpoint: options.checkpoint });
-      head = {
+      // Reuse the cached head: /status is polled by health checks, and resolving it per poll would
+      // multiply the upstream traffic for no extra information.
+      const resolved = await head();
+      headInfo = {
         height: resolved.head.height,
         trust: resolved.trust,
         approvedStakePercent: resolved.head.approvedStakePercent,
         validators: resolved.signers.length,
+        signerSource: resolved.signerSource,
       };
     } catch (error) {
-      head = { error: error instanceof Error ? error.message : String(error) };
+      headInfo = { error: error instanceof Error ? error.message : String(error) };
     }
     send(res, 200, {
       service: "proven proxy",
       upstream: upstreams,
       active: upstreams[preferred],
       strict: Boolean(options.strict),
-      checkpoint: options.checkpoint
-        ? { epochId: options.checkpoint.epochId, validators: options.checkpoint.validators.length, capturedAt: options.checkpoint.capturedAt }
+      checkpoint: activeCheckpoint
+        ? {
+            epochId: activeCheckpoint.epochId,
+            validators: activeCheckpoint.validators.length,
+            capturedAt: activeCheckpoint.capturedAt,
+            rolled: activeCheckpoint.epochId !== options.checkpoint?.epochId,
+          }
         : null,
       verifiable: VERIFIABLE_METHODS,
-      head,
+      head: headInfo,
       counters,
     });
   }
@@ -390,12 +504,22 @@ function u64(n: number | string): Uint8Array {
   return b;
 }
 
-/** Reads a checkpoint file when configured, ignoring a missing one. */
+/** Reads a checkpoint file when configured, ignoring a missing one but never a broken one silently. */
 export function loadCheckpoint(path: string | undefined): Checkpoint | undefined {
   if (!path) return undefined;
+  let raw: string;
   try {
-    return parseCheckpoint(readFileSync(path, "utf8"));
+    raw = readFileSync(path, "utf8");
   } catch {
+    return undefined;
+  }
+  try {
+    return parseCheckpoint(raw);
+  } catch (error) {
+    // Running without a pin is a real downgrade, so say so rather than serving weaker verdicts quietly.
+    console.warn(
+      `proven: ignoring ${path}: ${error instanceof Error ? error.message : String(error)} — verdicts will not be "anchored" until it is fixed`,
+    );
     return undefined;
   }
 }

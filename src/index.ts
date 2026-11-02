@@ -1,4 +1,4 @@
-﻿export * from "./base58.js";
+export * from "./base58.js";
 export * from "./borsh.js";
 export * from "./bytes.js";
 export * from "./merkle.js";

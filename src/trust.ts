@@ -43,6 +43,13 @@ export interface ResolvedHead {
   checks: Check[];
   /** Non-fatal remarks (e.g. "checkpoint is stale, fell back to quorum"). */
   notes: string[];
+  /**
+   * The producer set for the *next* epoch, when this head was verified against a pin. It is committed
+   * by this header's `next_bp_hash` and the header itself was signed by the pinned set, so adopting it
+   * advances the pin without trusting the endpoint. A caller that checks in once per epoch can stay
+   * `anchored` forever.
+   */
+  nextPin?: { epochId: string; validators: ValidatorStake[] };
 }
 
 const asRpc = (rpc: string | NearRpc): NearRpc => (rpc instanceof NearRpc ? rpc : new NearRpc(rpc));
@@ -148,11 +155,13 @@ export async function resolveHead(options: ResolveHeadOptions): Promise<Resolved
   // 1. Providers can legitimately be a block apart, so compare only views that claim the same
   //    height: two different descriptions of one height is a contradiction, timing skew is not.
   let quorum = false;
+  // The head we verify must be the one the providers corroborated — not simply the first to answer.
+  let view = views[0];
   if (views.length > 1) {
     const byHeight = new Map<number, LightClientBlockView[]>();
-    for (const view of views) {
-      const height = Number(view.inner_lite.height);
-      byHeight.set(height, [...(byHeight.get(height) ?? []), view]);
+    for (const candidate of views) {
+      const height = Number(candidate.inner_lite.height);
+      byHeight.set(height, [...(byHeight.get(height) ?? []), candidate]);
     }
     const comparable = [...byHeight.values()].filter((group) => group.length > 1);
     if (comparable.length === 0) {
@@ -161,20 +170,22 @@ export async function resolveHead(options: ResolveHeadOptions): Promise<Resolved
       );
     } else {
       const contradictions = comparable.filter(
-        (group) => group.some((view) => fingerprint(view) !== fingerprint(group[0])),
+        (group) => group.some((candidate) => fingerprint(candidate) !== fingerprint(group[0])),
       ).length;
       quorum = contradictions === 0;
+      // Use a head from the largest agreeing group; a lone provider at another height must not
+      // become the head the verdict is computed against.
+      const largest = [...comparable].sort((a, b) => b.length - a.length)[0];
+      view = largest[0];
       checks.push({
         name: "independent RPCs agree on the same light client block",
         ok: quorum,
         detail: quorum
-          ? `${comparable[0].length} providers at height ${comparable[0][0].inner_lite.height}`
+          ? `${largest.length} providers at height ${largest[0].inner_lite.height}`
           : `${contradictions} contradiction(s) — at least one provider is lying`,
       });
     }
   }
-
-  const view = views[0];
   const rpcValidators = view.next_bps ?? [];
   const epochId = view.inner_lite.epoch_id;
 
@@ -250,5 +261,17 @@ export async function resolveHead(options: ResolveHeadOptions): Promise<Resolved
         },
   );
 
-  return { head, view, trust, signers, signerSource, checks, notes };
+  // If the pin authenticated this head, the header also commits to the *next* epoch's producers.
+  // Adopting them is what keeps a long-running verifier anchored across epoch boundaries, without
+  // ever taking a set from the endpoint unverified: `next_bp_hash` is inside the signed header.
+  const canRoll =
+    trust === "anchored" &&
+    checks.every((c) => c.ok) &&
+    (view.next_bps?.length ?? 0) > 0 &&
+    view.inner_lite.next_epoch_id !== epochId;
+  const nextPin = canRoll
+    ? { epochId: view.inner_lite.next_epoch_id, validators: view.next_bps as ValidatorStake[] }
+    : undefined;
+
+  return { head, view, trust, signers, signerSource, checks, notes, nextPin };
 }

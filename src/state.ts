@@ -73,6 +73,8 @@ export async function verifyContractState(
     root: string;
     found: boolean;
     value: Uint8Array | null;
+    /** Did the node's payload carry a value, whatever the proof says? */
+    returnedValue: boolean;
     proofNodes: number;
     valueRef: { length: number; hash: Uint8Array } | null;
   }
@@ -92,6 +94,7 @@ export async function verifyContractState(
         root: bytesToHex(result.root),
         found: result.found,
         value,
+        returnedValue: raw !== undefined,
         proofNodes: proof.length,
         valueRef: result.found ? { length: result.valueLength!, hash: result.valueHash! } : null,
       });
@@ -105,15 +108,22 @@ export async function verifyContractState(
   }
 
   const chosen = attempts[0];
+  let valueMatched = false;
   if (chosen.valueRef) {
-    const matches = chosen.value !== null && valueMatchesRef(chosen.value, chosen.valueRef);
+    valueMatched = chosen.value !== null && valueMatchesRef(chosen.value, chosen.valueRef);
     checks.push({
       name: "stored value matches the leaf's commitment",
-      ok: matches,
+      ok: valueMatched,
       detail: `${chosen.value?.length ?? 0} bytes of ${chosen.valueRef.length} committed`,
     });
   } else {
-    checks.push({ name: "key is absent from the trie (proven by the path)", ok: true });
+    // The path proves the key is absent. The payload must agree: if the node hands back a value the
+    // trie does not contain, nothing commits to it and it must not be reported.
+    checks.push({
+      name: "key is absent from the trie, and no value was returned for it",
+      ok: !chosen.returnedValue,
+      detail: chosen.returnedValue ? "the node returned a value its own proof does not commit to" : undefined,
+    });
   }
 
   // Anchor the state root: reproduce the head block's header commitments, which the light client
@@ -158,7 +168,13 @@ export async function verifyContractState(
           : `shard ${shard}, block ${rootBlockHeight}`,
     });
   } catch (error) {
-    notes.push(`could not authenticate the block header: ${error instanceof Error ? error.message : String(error)}`);
+    // This is the only step that binds the root to a block the validators signed. If it cannot run,
+    // the proof proves nothing about the chain — that is a failed check, never a passing note.
+    checks.push({
+      name: "state root is committed by the head's chunk headers",
+      ok: false,
+      detail: `could not authenticate the block header: ${error instanceof Error ? error.message : String(error)}`,
+    });
   }
 
   // Independent nodes must agree on both the root and the value, which catches a provider that
@@ -177,7 +193,7 @@ export async function verifyContractState(
     checks.push({
       name: `${attempts.length} independent RPCs agree on the value and its proof`,
       ok: agree,
-      detail: agree ? `state root ${first.root.slice(0, 12)}â€¦` : "nodes disagree",
+      detail: agree ? `state root ${first.root.slice(0, 12)}…` : "nodes disagree",
     });
     trust = agree ? "quorum" : "rpc-asserted";
   }
@@ -192,9 +208,13 @@ export async function verifyContractState(
     );
   }
 
-  const value = chosen.value;
+  // Never surface a value the proof did not cover: a byte that fails its commitment — or a proof that
+  // never reached a signed root — is the endpoint's opinion, not data, and handing it back invites
+  // callers to act on it.
+  const verified = checks.every((c) => c.ok);
+  const value = verified && valueMatched ? chosen.value : null;
   return {
-    verified: checks.every((c) => c.ok),
+    verified,
     value: {
       accountId,
       key,
@@ -221,7 +241,7 @@ export async function verifyContractState(
 function printable(bytes: Uint8Array): string {
   const text = bytesToUtf8(bytes);
   // eslint-disable-next-line no-control-regex
-  return /^[\x09\x0a\x0d\x20-\x7e]*$/.test(text) ? text : `${bytesToHex(bytes).slice(0, 64)}â€¦`;
+  return /^[\x09\x0a\x0d\x20-\x7e]*$/.test(text) ? text : `${bytesToHex(bytes).slice(0, 64)}…`;
 }
 
 export { sha256 };

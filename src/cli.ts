@@ -38,7 +38,14 @@ const TRUST_LABEL: Record<TrustLevel, string> = {
   "rpc-asserted": `${YELLOW}rpc-asserted${RESET} (single RPC — self-consistent only)`,
 };
 
-const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1]?.startsWith("--")));
+/** Flags that take the token after them as their value; every other `--flag` is a switch. */
+const VALUE_FLAGS = new Set(["rpc", "rpcs", "checkpoint", "out", "network"]);
+
+const positional = args.filter((a, i) => {
+  if (a.startsWith("--")) return false;
+  const previous = args[i - 1];
+  return !(previous?.startsWith("--") && VALUE_FLAGS.has(previous.slice(2)));
+});
 
 /** `--checkpoint <file>`, else the checkpoint shipped with the package, else none. */
 function loadCheckpoint(): Checkpoint | undefined {

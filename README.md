@@ -82,10 +82,19 @@ A **pin** (checkpoint) is that key list, recorded earlier from a moment you trus
 one epoch, with the hash proving the file wasn't edited. Now the RPC cannot swap the keys, and a lie
 needs >2/3 of NEAR's real stake.
 
-NEAR replaces its producer set every epoch (~12 h), so a pin covers exactly one epoch. When it goes
-stale, `proven` doesn't pretend: it drops to `quorum`/`rpc-asserted` and says which. `proven` never
-auto-pins behind your back — that would silently re-accept the attacker's set and destroy the whole
-guarantee.
+NEAR replaces its producer set every epoch (~12 h), so a pin covers exactly one epoch. Two things
+follow:
+
+- **A running verifier keeps itself anchored.** While a pin still authenticates the head, that head's
+  header commits to the *next* epoch's producers (`next_bp_hash`), so the next set arrives
+  signed. The proxy stashes it and promotes it only when the head actually enters that epoch. No
+  re-pinning, no trusting the endpoint — a service that stays up stays `anchored` indefinitely.
+- **A verifier that has been off for more than an epoch cannot bridge the gap.** The public RPC has
+  no "walk forward one epoch" call, so there is nothing to chain from; `proven` drops to
+  `quorum`/`rpc-asserted`, says which, and asks for a re-pin.
+
+`proven` never auto-pins behind your back: re-pinning from the endpoint it is verifying would accept
+whatever set that endpoint claims, which is the exact forgery the pin exists to stop.
 
 ## Tracks it leans on
 
@@ -271,9 +280,14 @@ keep working untouched. The verdict rides in headers.
 
 | Verifiability | Methods | Verdict header |
 |---|---|---|
-| full proof | `tx`, `EXPERIMENTAL_tx_status`, `query` (`view_state` + `include_proof`) | `x-proven-verified: true`, trust `anchored`/`quorum` |
-| self-consistent | `block` (header hash recomputed from its own contents) | `x-proven-verified: self` |
+| full proof | `tx`, `EXPERIMENTAL_tx_status` (transaction outcome **and** the final receipt), `query` `view_state` + `include_proof` (exact key), `block` (header hash recomputed) | `x-proven-verified: true` / `self`, trust `anchored`/`quorum` |
 | none | everything else | `x-proven-verified: unverified` — or `rejected` in strict mode |
+
+`x-proven-scope` says exactly what was checked, e.g. `transaction_outcome+last_of_2_receipts`.
+
+A `view_state` read is only claimed as verified when it is an **exact key** at the head: a prefix
+query returns a range of values that one trie path does not commit to, and a `block_id` names a height
+the verifier is not querying. Those are forwarded as `unverified` rather than over-claimed.
 
 A response that **fails** verification is never handed back: the proxy returns a JSON-RPC error
 (`-32002`) instead, so a lying upstream cannot inject data silently. `PROVEN_STRICT=1` additionally
@@ -487,7 +501,7 @@ hit them:
 
 ## Status
 
-Verified against live mainnet: 22/22 offline vector tests, 5/5 proxy tests, live tamper demos, a
+Verified against live mainnet: 26 offline vector tests, 6 proxy tests, live tamper demos, a
 receipt outcome with 5 log hashes, a failed outcome, a contract-storage proof anchored through
 `inner_rest` and `chunk_headers_root`, and outcome proofs up to ~100,000 blocks deep. Historical
 limits come from the node's outcome retention, not from the verifier.
@@ -502,8 +516,8 @@ Known gaps:
 2. **Header encoding is protocol-pinned.** `BlockHeaderInnerRestV6` + `ShardChunkHeaderInnerV5` match
    protocol 86; a future protocol bump must add the new variants (the code degrades to
    `quorum`/`rpc-asserted` instead of guessing, and the check says which hash failed).
-3. **The pin expires every epoch** (~12h); refresh with `proven checkpoint`. Re-pinning is manual on
-   purpose: re-pinning automatically would re-adopt whatever set the endpoint claims.
-4. **Bridging an old pin is not possible over the public RPC.** `next_light_client_block` never walks
-   forward one epoch at a time, so a client cannot chain from a week-old pin to today's head; it needs
-   a pin for the current epoch (which is why the app has a one-click re-pin).
+3. **A pin covers one epoch** (~12h). A process that stays up rolls its own pin forward from the
+   `next_bp_hash` of a head the current pin already authenticated, so it stays `anchored` without
+   help; a verifier that was off for longer than an epoch has nothing to chain from and must re-pin.
+   Re-pinning is manual on purpose: doing it automatically would re-adopt whatever set the endpoint
+   claims.

@@ -26,7 +26,7 @@ export type RawTrieNode =
 export interface DecodedTrieNode {
   node: RawTrieNode;
   memoryUsage: bigint;
-  /** `sha256(borsh(node))` â€” the hash the parent must point at. */
+  /** `sha256(borsh(node))` — the hash the parent must point at. */
   hash: Uint8Array;
 }
 
@@ -112,7 +112,7 @@ export function decodeTrieNode(bytes: Uint8Array): DecodedTrieNode {
   return { node, memoryUsage, hash: sha256(bytes) };
 }
 
-/** Hex-prefix ("HP") encoded nibble path â†’ nibble values. */
+/** Hex-prefix ("HP") encoded nibble path → nibble values. */
 export function decodeEncodedKey(encoded: Uint8Array): number[] {
   if (encoded.length === 0) return [];
   const offset = (encoded[0] & 0x10) !== 0 ? 1 : 2;

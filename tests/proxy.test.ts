@@ -98,6 +98,32 @@ function startLiar(): Promise<{ url: string; close: () => void }> {
   );
 }
 
+/** An upstream that rewrites the *receipt* outcome, leaving the transaction outcome honest. */
+function startReceiptLiar(): Promise<{ url: string; close: () => void }> {
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", async () => {
+      const body = await fetch(UPSTREAM, { method: "POST", headers: { "content-type": "application/json" }, body: raw });
+      const json: any = await body.json();
+      const receipts = json.result?.receipts_outcome;
+      if (Array.isArray(receipts) && receipts.length > 0) {
+        const last = receipts[receipts.length - 1];
+        last.outcome.executor_id = `${last.outcome.executor_id}-attacker`;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(json));
+    });
+  });
+  return new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({ url: `http://127.0.0.1:${port}`, close: () => server.close() });
+    }),
+  );
+}
+
 test("honest upstream: tx status is verified and tagged anchored", async () => {
   const proxy = createProvenProxy({ upstream: UPSTREAMS, checkpoint });
   const server = await proxy.listen(0, "127.0.0.1");
@@ -132,6 +158,27 @@ test("lying upstream: a rewritten outcome is refused, not forwarded", async () =
     assert.equal(response.headers.get("x-proven-verified"), "false");
     assert.ok(response.body.error, "the payload must not be handed back");
     assert.match(response.body.error.message, /verification failed/);
+  } finally {
+    server.close();
+    liar.close();
+  }
+});
+
+test("lying upstream: a rewritten receipt is refused, not forwarded", async () => {
+  const liar = await startReceiptLiar();
+  const proxy = createProvenProxy({ upstream: [liar.url, ...UPSTREAMS], checkpoint });
+  const server = await proxy.listen(0, "127.0.0.1");
+  try {
+    const tx = await sampleTransaction();
+    const port = (server.address() as any).port;
+    const response = await rpc(`http://127.0.0.1:${port}`, "EXPERIMENTAL_tx_status", {
+      tx_hash: tx.hash,
+      sender_account_id: tx.signer,
+    });
+    // The transaction outcome is honest here; only the receipt — where the contract-call result lives —
+    // is rewritten. That must not pass.
+    assert.equal(response.headers.get("x-proven-verified"), "false");
+    assert.ok(response.body.error, "the payload must not be handed back");
   } finally {
     server.close();
     liar.close();
