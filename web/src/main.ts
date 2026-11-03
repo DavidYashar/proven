@@ -141,12 +141,35 @@ function renderChecks(checks: Check[]): string {
     .join("")}</ul>`;
 }
 
+/** Appended wherever a transport verdict is shown, so the words and the badge agree. */
+const TRANSPORT_NOTE =
+  "Nothing was proven either way: the endpoint did not answer the checks it could not serve. That is a network problem, not a verdict on the chain.";
+
+/**
+ * A failed check whose reason is the network is not evidence of a lie. When *every* failure is a
+ * transport failure, the honest verdict is "nothing was checked" — otherwise a provider that simply
+ * sends no CORS headers gets accused of forging the chain it never got to answer about.
+ */
+const onlyTransportFailed = (checks: Check[]): boolean => {
+  const failed = checks.filter((c) => !c.ok);
+  return failed.length > 0 && failed.every((c) => looksLikeTransport(c.detail ?? ""));
+};
+
+const verdictOf = (verified: boolean, checks: Check[]): { text: string; kind: string } =>
+  verified
+    ? { text: "VERIFIED", kind: "verified" }
+    : onlyTransportFailed(checks)
+      ? { text: "NOT VERIFIED — the endpoint did not answer", kind: "transport" }
+      : { text: "REJECTED", kind: "verdict" };
+
 function renderResult<T>(title: string, result: ProvenResult<T>, extra: Record<string, string>): void {
+  const verdict = verdictOf(result.verified, result.checks);
   const notes = [...result.notes, ...liveEvents];
+  if (verdict.kind === "transport") notes.push(TRANSPORT_NOTE);
   el.output.hidden = false;
   el.output.innerHTML = `
     <h3>${esc(title)}</h3>
-    <p class="verdict" data-ok="${result.verified}">${result.verified ? "VERIFIED" : "REJECTED"}</p>
+    <p class="verdict" data-ok="${result.verified}" data-kind="${verdict.kind}">${verdict.text}</p>
     <div class="meta">
       <span class="k">trust</span><span class="v">${esc(trustText(result.trust))}</span>
       <span class="k">light client head</span><span class="v">${result.head.height} · ${result.head.approvedStakePercent}% of staked NEAR signed</span>
@@ -162,10 +185,12 @@ function renderResult<T>(title: string, result: ProvenResult<T>, extra: Record<s
 
 function renderHeadOnly(resolved: Head): void {
   const verified = resolved.checks.every((c) => c.ok);
+  const verdict = verdictOf(verified, resolved.checks);
+  const notes = [...resolved.notes, ...(verdict.kind === "transport" ? [TRANSPORT_NOTE] : [])];
   el.output.hidden = false;
   el.output.innerHTML = `
     <h3>light client head</h3>
-    <p class="verdict" data-ok="${verified}">${verified ? "VERIFIED" : "REJECTED"}</p>
+    <p class="verdict" data-ok="${verified}" data-kind="${verdict.kind}">${verdict.text}</p>
     <div class="meta">
       <span class="k">trust</span><span class="v">${esc(trustText(resolved.trust))}</span>
       <span class="k">height</span><span class="v">${resolved.head.height}</span>
@@ -173,7 +198,7 @@ function renderHeadOnly(resolved: Head): void {
       <span class="k">signed stake</span><span class="v">${resolved.head.approvedStakePercent}% · ${resolved.head.signatureCount} validators</span>
     </div>
     ${renderChecks(resolved.checks)}
-    ${resolved.notes.length ? `<div class="note">${resolved.notes.map(esc).join("<br />")}</div>` : ""}
+    ${notes.length ? `<div class="note">${notes.map(esc).join("<br />")}</div>` : ""}
   `;
   setBadge(resolved.trust, verified);
 }
@@ -183,7 +208,7 @@ function renderHeadOnly(resolved: Head): void {
  * "VERIFICATION FAILED" would accuse the chain of lying when nothing was checked at all.
  */
 const looksLikeTransport = (message: string): boolean =>
-  /did not serve|failed to fetch|no rpc could|rate limit|too many requests|429|timed out|abort|network/i.test(
+  /did not serve|did not answer|not answered|failed to fetch|no rpc could|rate limit|too many requests|429|timed out|abort|network/i.test(
     message,
   );
 
@@ -225,32 +250,130 @@ function confirmInline(html: string, yesLabel: string, noLabel: string): Promise
   });
 }
 
+/** When the endpoint last answered anything at all — the measure the silence limit watches. */
+let lastResponseAt = Date.now();
+let busySince = 0;
+let busyTicker: ReturnType<typeof setInterval> | undefined;
+
+const hostOf = (url: string): string => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+};
+
+/**
+ * A dead endpoint does not fail fast: the retry and the light-client walk are each a 10 s stall, and a
+ * head check piles several of them up (measured: 36 s of a spinner that says nothing). This turns
+ * silence into a verdict — if nothing has come back for `SILENCE_MS`, stop waiting and say so. The
+ * clock resets on every answer, so a slow-but-working endpoint is never declared dead.
+ */
+const SILENCE_MS = 20_000;
+
+function withSilenceLimit<T>(work: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const watch = setInterval(() => {
+      if (Date.now() - lastResponseAt > SILENCE_MS) {
+        clearInterval(watch);
+        reject(new Error(`the endpoint has not answered for ${Math.round(SILENCE_MS / 1000)}s`));
+      }
+    }, 500);
+    const settle = (): void => clearInterval(watch);
+    work.then(
+      (value) => {
+        settle();
+        resolve(value);
+      },
+      (error) => {
+        settle();
+        reject(error);
+      },
+    );
+  });
+}
+
 function setBusy(value: boolean): void {
   busy = value;
   for (const button of [el.verify, el.example, el.head, el.repin, el.verifyState]) button.disabled = value;
-  if (value) {
-    el.output.hidden = false;
-    el.output.innerHTML = `<p class="verdict" data-ok="true"><span class="spinner"></span> verifying…</p>`;
+  if (busyTicker !== undefined) {
+    clearInterval(busyTicker);
+    busyTicker = undefined;
   }
+  if (!value) return;
+
+  lastResponseAt = Date.now();
+  busySince = Date.now();
+  el.output.hidden = false;
+  // Never a spinner with no information in it: say how long, and what is being waited on.
+  const paint = (): void => {
+    const seconds = Math.round((Date.now() - busySince) / 1000);
+    el.output.innerHTML = `<p class="verdict" data-ok="true"><span class="spinner"></span> verifying… ${seconds}s${
+      seconds >= 3 ? `<span class="waiting">waiting for ${esc(hostOf(el.rpc.value.trim()))}</span>` : ""
+    }</p>`;
+  };
+  paint();
+  busyTicker = setInterval(paint, 1000);
+}
+
+/**
+ * Runs one user action under the silence limit. Every action goes through here, so a dead endpoint can
+ * only ever end in a verdict — never in a spinner that outlives the user's patience. The returned
+ * promise settles with the action, so callers that await it (a provider switch) see the verdict.
+ */
+function runAction(work: () => Promise<void>, options: { markUpstreamBad?: boolean } = {}): Promise<void> {
+  if (busy) return Promise.resolve();
+  setBusy(true);
+  return withSilenceLimit(work())
+    .catch((error) => {
+      renderError(error instanceof Error ? error.message : String(error));
+      if (options.markUpstreamBad !== false) markUpstream("bad");
+    })
+    .finally(() => setBusy(false));
 }
 
 // ------------------------------------------------------------------ actions
 
 const currentLie = (): Lie => el.lie.value as Lie;
 
+/**
+ * Stamps every *answer* onto the clock the silence limit reads. A rejected fetch is not an answer — a
+ * dead endpoint rejects every 10 s, and counting those as progress is what let a head check spin for
+ * 42 s. Successes only: any real response (even a JSON-RPC error) proves the endpoint is alive.
+ */
+function measuredFetch(inner: typeof fetch): typeof fetch {
+  return (input: RequestInfo | URL, init?: RequestInit) => {
+    const pending = inner(input as any, init);
+    pending.then(
+      () => {
+        lastResponseAt = Date.now();
+      },
+      () => {},
+    );
+    return pending;
+  };
+}
+
 function rpc(): NearRpc {
   liveEvents.length = 0;
+  // Every request goes through this wrapper, so "has it answered anything at all" is measurable and the
+  // silence limit is about the endpoint, not about how much work is queued behind it.
   return new NearRpc({
     url: el.rpc.value.trim(),
-    fetchImpl: createTamperedFetch(currentLie(), (message) => liveEvents.push(`attacker: ${message}`)),
+    fetchImpl: measuredFetch(createTamperedFetch(currentLie(), (message) => liveEvents.push(`attacker: ${message}`))),
   });
+}
+
+/** The endpoint as it is, never through the demo's tampering — used for pin upkeep. */
+function plainRpc(url: string): NearRpc {
+  return new NearRpc({ url, fetchImpl: measuredFetch(fetch) });
 }
 
 async function refreshCheckpointStatus(): Promise<void> {
   try {
     // Pin upkeep goes to the endpoint as it is, never through the demo's tampering: a lie chosen for
     // the next verification must not be what decides whether the pin is kept fresh.
-    const resolved = await resolveHead({ rpcs: [new NearRpc(el.rpc.value.trim())], checkpoint, requireAnchor: false });
+    const resolved = await resolveHead({ rpcs: [plainRpc(el.rpc.value.trim())], checkpoint, requireAnchor: false });
     adoptWalkedPin(resolved);
     showCheckpointStatus(resolved);
   } catch (error) {
@@ -303,8 +426,7 @@ async function runVerify(): Promise<void> {
     renderError("enter a transaction hash and its signer account id");
     return;
   }
-  setBusy(true);
-  try {
+  return runAction(async () => {
     if (currentLie() === "forge") {
       throw new Error(
         "a forged validator set has no real proofs to serve — use “Check the head only” to see this attack",
@@ -323,12 +445,7 @@ async function runVerify(): Promise<void> {
     if (value !== null) extra["return value"] = value;
     renderResult(`transaction ${hash.slice(0, 16)}…`, result, extra);
     markUpstream(result.verified ? "ok" : "bad");
-  } catch (error) {
-    renderError(error instanceof Error ? error.message : String(error));
-    markUpstream("bad");
-  } finally {
-    setBusy(false);
-  }
+  });
 }
 
 async function runState(): Promise<void> {
@@ -339,8 +456,7 @@ async function runState(): Promise<void> {
     renderError("enter a contract account id and a storage key");
     return;
   }
-  setBusy(true);
-  try {
+  return runAction(async () => {
     const client = rpc();
     const resolvedHead = await headFor(client);
     const result = await verifyContractState(accountId, new TextEncoder().encode(key), {
@@ -364,34 +480,22 @@ async function runState(): Promise<void> {
     `;
     setBadge(result.trust, result.verified);
     markUpstream(result.verified ? "ok" : "bad");
-  } catch (error) {
-    renderError(error instanceof Error ? error.message : String(error));
-    markUpstream("bad");
-  } finally {
-    setBusy(false);
-  }
+  });
 }
 
 async function runHead(): Promise<void> {
   if (busy) return;
-  setBusy(true);
-  try {
+  return runAction(async () => {
     const resolved = await headFor(rpc());
     const verified = resolved.checks.every((c) => c.ok);
     renderHeadOnly(resolved);
     markUpstream(verified ? "ok" : "bad");
-  } catch (error) {
-    renderError(error instanceof Error ? error.message : String(error));
-    markUpstream("bad");
-  } finally {
-    setBusy(false);
-  }
+  });
 }
 
 async function loadExample(): Promise<void> {
   if (busy) return;
-  setBusy(true);
-  try {
+  return runAction(async () => {
     const client = rpc();
     const head = await client.finalBlock();
     for (let back = 6; back < 20; back++) {
@@ -404,20 +508,15 @@ async function loadExample(): Promise<void> {
       }
     }
     throw new Error("could not find a recent transaction");
-  } catch (error) {
-    renderError(error instanceof Error ? error.message : String(error));
-  } finally {
-    setBusy(false);
-  }
+  }, { markUpstreamBad: false });
 }
 
 async function repin(): Promise<void> {
   if (busy) return;
-  setBusy(true);
-  try {
+  return runAction(async () => {
     const rpcUrl = el.rpc.value.trim();
     // Pin upkeep never goes through the demo's tampering.
-    const client = new NearRpc(rpcUrl);
+    const client = plainRpc(rpcUrl);
 
     // First, reach the current epoch from a pin this page already trusts. Each hop is signed by the set
     // the previous one committed to, so the result is exactly as strong as the starting pin — no
@@ -472,11 +571,7 @@ async function repin(): Promise<void> {
     saveCheckpoint(checkpoint);
     await refreshCheckpointStatus();
     el.output.hidden = true;
-  } catch (error) {
-    renderError(error instanceof Error ? error.message : String(error));
-  } finally {
-    setBusy(false);
-  }
+  }, { markUpstreamBad: false });
 }
 
 // ------------------------------------------------------------------ "use it" card

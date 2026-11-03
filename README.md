@@ -354,6 +354,15 @@ a full head verification against it, so the switch shows green rather than a pro
 sweeps the list — surveying public endpoints for you would be load-testing someone else's server to
 answer a question you did not ask.
 
+**A dead endpoint cannot leave the page spinning.** A stalled endpoint does not fail fast: the client
+retries, and the light-client walk stacks several 10 s stalls, which measured 42 s of a spinner saying
+nothing. Every action now runs under a silence limit — if nothing has come back for 20 s the page stops
+waiting and says `NOT VERIFIED — the endpoint did not answer` — and the spinner counts the seconds and
+names the host it is waiting on. The clock resets on every real answer, so a slow-but-working endpoint
+(a 6 s-per-request archival node) is never declared dead. A failed check whose only reason is the
+network is likewise labelled *not verified* rather than *rejected*: a provider that sends no CORS
+headers must not be accused of forging a chain it never answered about.
+
 | Verifiability | Methods | Verdict header |
 |---|---|---|
 | full proof | `tx`, `EXPERIMENTAL_tx_status` (transaction outcome, **every receipt walked from it**, and the derived `status`), `query` `view_state` + `include_proof` (exact key), `block` (header hash recomputed, `scope: header_only`) | `x-proven-verified: true` / `self`, trust `anchored`/`quorum` |
