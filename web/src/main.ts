@@ -337,9 +337,11 @@ el.tx.addEventListener("keydown", (event) => {
 });
 
 syncBlurb();
-void refreshCheckpointStatus();
 
-// A deployment can default to a verifying proxy instead of a raw RPC (see render.yaml).
+// A deployment can default to a verifying proxy instead of a raw RPC (see render.yaml). This must be
+// applied before the first status check, or that check probes the endpoint baked into the HTML.
 const defaultRpc = (import.meta as any).env?.VITE_DEFAULT_RPC as string | undefined;
 if (defaultRpc) el.rpc.value = defaultRpc;
+
+void refreshCheckpointStatus();
 

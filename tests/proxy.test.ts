@@ -245,6 +245,43 @@ test("a forged status, log or dropped receipt is refused", async () => {
   }
 });
 
+test("view_state: a failed proof is not reported as a proven-absent key", async () => {
+  // The library returns value=null both for "absent" and for "the proof failed", so the proxy has to
+  // consult `verified` first. This is the regression that made an emptied payload look proven.
+  const liar = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", async () => {
+      const body = await fetch(UPSTREAM, { method: "POST", headers: { "content-type": "application/json" }, body: raw });
+      const json: any = await body.json();
+      if (json.result?.values) {
+        json.result.values = []; // claim the key is absent while keeping the proof for it
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(json));
+    });
+  });
+  const port: number = await new Promise((resolve) => {
+    liar.listen(0, "127.0.0.1", () => resolve((liar.address() as any).port));
+  });
+  const proxy = createProvenProxy({ upstream: [`http://127.0.0.1:${port}`], checkpoint });
+  const server = await proxy.listen(0, "127.0.0.1");
+  try {
+    const proxyPort = (server.address() as any).port;
+    const response = await rpc(`http://127.0.0.1:${proxyPort}`, "query", {
+      request_type: "view_state",
+      account_id: "mpc-prover-0_4_12.bridge.near",
+      prefix_base64: Buffer.from("STATE").toString("base64"),
+      include_proof: true,
+      finality: "final",
+    });
+    assert.equal(response.headers.get("x-proven-verified"), "false", JSON.stringify(response.body).slice(0, 200));
+  } finally {
+    server.close();
+    liar.close();
+  }
+});
+
 test("strict mode refuses methods that have no proof primitive", async () => {
   const proxy = createProvenProxy({ upstream: UPSTREAMS, checkpoint, strict: true });
   const server = await proxy.listen(0, "127.0.0.1");

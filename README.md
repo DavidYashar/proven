@@ -89,10 +89,9 @@ therefore covers one epoch — but it does not expire, because it can be *walked
 - **A running verifier rolls its own pin.** While a pin still authenticates the head, that head's
   header commits to the *next* epoch's producers (`next_bp_hash`), so the next set arrives signed.
   The proxy stashes it and promotes it only when the head actually enters that epoch.
-- **A verifier that was off for days walks back into place.** `next_light_client_block(hash)` returns
-  the light client block of the *next* epoch, so from the pinned block you can step forward one epoch
-  at a time, each step checked with the set the previous step committed to. A pin from a week ago
-  recovers on its own:
+- **A verifier that was off walks back into place.** `next_light_client_block(hash)` returns the light
+  client block of the *next* epoch, so from the pinned block you can step forward one epoch at a time,
+  each step checked with the set the previous step committed to:
 
   ```text
   note: stale pin walked forward 1 epoch(s) (gW2aCeaW… -> 4SNpeKx4…), each step signed by the set
@@ -100,10 +99,12 @@ therefore covers one epoch — but it does not expire, because it can be *walked
     ✓ checkpoint applies to this head — epoch 4SNpeKx4…, 100 pinned producers
   ```
 
-  The walk needs the node to still serve those blocks; a pruned endpoint covers a couple of epochs,
-  an archival one covers as far back as you like.
-- **Only if the walk cannot run** (a v2-era pin, or the node has dropped the history) does trust fall
-  to `quorum`/`rpc-asserted` — and it says so.
+  How far back this reaches depends on the node, and it is measured rather than assumed: the free
+  endpoint walks ~2 epochs (1.1 s for one, 6.6 s for two) and drops older blocks; an archival endpoint
+  walked 4 epochs in 1.2 s. The walk tries **every** configured upstream, so put an archival one in
+  `UPSTREAM_RPC` if you leave a pin unattended for longer.
+- **Only if no walk can run** (a v2-era pin, or every provider has dropped the history) does trust
+  fall to `quorum`/`rpc-asserted` — and it says so, with the reason.
 
 What `proven` still refuses to do is re-pin from the endpoint it is verifying: that would accept
 whatever set that endpoint claims, which is the exact forgery the pin exists to stop.
@@ -296,9 +297,13 @@ keep working untouched. The verdict rides in headers.
 | none | everything else | `x-proven-verified: unverified` — or `rejected` in strict mode |
 
 `x-proven-scope` says exactly what was checked, e.g.
-`transaction_outcome+2_receipt(s)+status;tx_body_unverified`. The transaction *body* is the one part
-that is not covered: re-hashing it means re-encoding every action, and a deploy's view carries the
-code hash rather than the code. It is named in the scope rather than quietly assumed.
+`transaction_outcome+2_receipt(s)+status;tx_body_unverified`. Two things are named rather than
+assumed: the transaction **body** (re-hashing it means re-encoding every action, and a deploy's view
+carries the code hash rather than the code) and, when present, the **`receipts[]` contents**.
+
+A transaction that is still executing has no receipt proofs yet, so it comes back
+`x-proven-verified: unverified` with the payload intact — never a `-32002` error, because a wallet
+polling a fresh transaction is normal. Only an answer that *contradicts* the chain is refused.
 
 A `view_state` read is only claimed as verified when it is an **exact key** at the head: a prefix
 query returns a range of values that one trie path does not commit to, and a `block_id` names a height

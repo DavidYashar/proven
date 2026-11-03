@@ -44,6 +44,11 @@ export interface ResolvedHead {
   /** Non-fatal remarks (e.g. "checkpoint is stale, fell back to quorum"). */
   notes: string[];
   /**
+   * A pin that was walked forward to cover this head. Callers should adopt and persist it: otherwise
+   * every request re-walks the same gap.
+   */
+  bridgedPin?: Checkpoint;
+  /**
    * The producer set for the *next* epoch, when this head was verified against a pin. It is committed
    * by this header's `next_bp_hash` and the header itself was signed by the pinned set, so adopting it
    * advances the pin without trusting the endpoint. A caller that checks in once per epoch can stay
@@ -191,18 +196,26 @@ export async function resolveHead(options: ResolveHeadOptions): Promise<Resolved
 
   // 2. Decide which validator set is allowed to authenticate this head.
   let signers: ValidatorStake[] | null = null;
+  let bridgedPin: Checkpoint | undefined;
   let signerSource = "";
   let trust: TrustLevel = quorum ? "quorum" : "rpc-asserted";
 
   if (options.checkpoint) {
     let pin = options.checkpoint;
     let mismatch = checkpointMismatch(pin, view);
-    if (mismatch !== null && !options.requireAnchor && (pin.version ?? 0) >= 3) {
+    if (mismatch !== null && (pin.version ?? 0) >= 3) {
       // The pin is stale, but it can be walked forward: each epoch's producer set is committed by the
       // previous epoch's signed header. Recovering here is what keeps a shipped pin usable days later.
-      const bridged = await bridgeCheckpoint(rpcs[0], pin, epochId).catch(() => null);
+      // Every provider gets a turn, because a pruned endpoint drops old blocks while an archival one
+      // keeps them ? and this runs in strict mode too, since a walked pin is fully signature-checked.
+      let bridged: Awaited<ReturnType<typeof bridgeCheckpoint>> = null;
+      for (const rpc of rpcs) {
+        bridged = await bridgeCheckpoint(rpc, pin, epochId).catch(() => null);
+        if (bridged) break;
+      }
       if (bridged) {
         pin = bridged.checkpoint;
+        bridgedPin = bridged.checkpoint;
         mismatch = checkpointMismatch(pin, view);
         notes.push(
           `stale pin walked forward ${bridged.steps} epoch(s) (${options.checkpoint.epochId.slice(0, 8)}… -> ${pin.epochId.slice(0, 8)}…), each step signed by the set the previous one committed to`,
@@ -291,5 +304,5 @@ export async function resolveHead(options: ResolveHeadOptions): Promise<Resolved
     ? { epochId: view.inner_lite.next_epoch_id, validators: view.next_bps as ValidatorStake[] }
     : undefined;
 
-  return { head, view, trust, signers, signerSource, checks, notes, nextPin };
+  return { head, view, trust, signers, signerSource, checks, notes, nextPin, bridgedPin };
 }

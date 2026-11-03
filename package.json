@@ -26,7 +26,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepare": "npm run build",
+    "prepare": "node scripts/prepare.mjs",
     "dev": "tsx src/cli.ts",
     "verify": "tsx src/cli.ts",
     "test": "tsx tests/vectors.test.ts && tsx tests/state-attack.test.ts && tsx tests/bridge.test.ts",

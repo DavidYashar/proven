@@ -42,6 +42,9 @@ export interface ProxyOptions {
 
 export type Verdict = "true" | "self" | "false" | "unverified" | "rejected";
 
+/** Thrown when an answer cannot be judged either way — pending, too large, or the proof is absent. */
+class Unverifiable extends Error {}
+
 export interface ProxyCounters {
   requests: number;
   verified: number;
@@ -141,6 +144,14 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
    * remembering them turns a repeated `tx_status` into a single proof fetch.
    */
   const provenOutcomes = new Map<string, any>();
+  const PROVEN_CACHE_MAX = 5_000;
+  function rememberOutcome(id: string, outcome: any): void {
+    if (provenOutcomes.size >= PROVEN_CACHE_MAX) {
+      const oldest = provenOutcomes.keys().next();
+      if (!oldest.done) provenOutcomes.delete(oldest.value);
+    }
+    provenOutcomes.set(id, outcome);
+  }
 
   /**
    * The head is what every proof is checked against, and resolving it costs several RPC round-trips.
@@ -167,7 +178,12 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
       // `anchored` only means the epoch label matched; require every signature check to have passed
       // before adopting the set, or one bad promotion fails every proof until a restart.
       if (promoted.trust === "anchored" && promoted.checks.every((c) => c.ok)) {
-        activeCheckpoint = nextCheckpoint;
+        // Rebuild from the head we just verified, so every field (block hash, height, next epoch, and
+        // the following set) describes *this* epoch rather than the one we came from.
+        activeCheckpoint = makeCheckpoint(promoted.view, promoted.signers, {
+          network: activeCheckpoint?.network ?? "mainnet",
+          sourceRpc: activeCheckpoint?.sourceRpc,
+        });
         nextCheckpoint = undefined;
         resolved = promoted;
         console.log(
@@ -175,6 +191,12 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
         );
         options.onRolled?.(activeCheckpoint);
       }
+    }
+
+    if (resolved.bridgedPin) {
+      // Adopt a walked pin immediately, so the next request does not pay for the same walk again.
+      activeCheckpoint = resolved.bridgedPin;
+      options.onRolled?.(activeCheckpoint);
     }
 
     if (resolved.nextPin) {
@@ -224,6 +246,14 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
         return run(await head(true));
       });
       const reported = result?.transaction_outcome?.outcome;
+      // Identity is free to check and closes the cheapest forgeries: the outcome must belong to the
+      // transaction that was asked for.
+      if (result?.transaction_outcome?.id && result.transaction_outcome.id !== hash) {
+        throw new Error("transaction_outcome.id does not match the requested transaction");
+      }
+      if (result?.transaction?.signer_id && result.transaction.signer_id !== signer) {
+        throw new Error("transaction.signer_id does not match the requested signer");
+      }
       if (!proven.verified || !outcomesMatch(reported, proven.value.outcome)) {
         return {
           verdict: "false",
@@ -251,7 +281,7 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
       for (let round = 0; round < 8 && frontier.length > 0; round++) {
         const batch = frontier.filter((id) => !provenReceipts.has(id));
         frontier = [];
-        if (batch.length > 32) throw new Error(`transaction has too many receipts to verify in one request (${batch.length})`);
+        if (batch.length > 32) throw new Unverifiable(`transaction has more receipts (${batch.length}) than one request will verify`);
         const provenBatch = await Promise.all(
           batch.map(async (receiptId) => {
             // The executor is what the proof request needs as `receiver_id`; if the reported executor
@@ -272,7 +302,7 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
                 `receipt ${receiptId.slice(0, 8)}… proof failed: ${proof.checks.find((c) => !c.ok)?.name ?? "unknown"}`,
               );
             }
-            provenOutcomes.set(receiptId, proof.value.outcome);
+            rememberOutcome(receiptId, proof.value.outcome);
             return { receiptId, proven: proof.value.outcome };
           }),
         );
@@ -284,6 +314,21 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
           provenReceipts.set(receiptId, outcome);
           frontier.push(...(outcome.receipt_ids ?? []));
         }
+      }
+
+      // The receiver named in the transaction must be the account that actually ran its first receipt.
+      const firstReceiptId = (proven.value.outcome.receipt_ids ?? [])[0];
+      if (result?.transaction?.receiver_id && firstReceiptId) {
+        const first = provenReceipts.get(firstReceiptId);
+        if (first && first.executor_id !== result.transaction.receiver_id) {
+          throw new Error("transaction.receiver_id does not match the account that executed the transaction");
+        }
+      }
+
+      // Eight levels is far deeper than any real transaction; if it is not enough, say so rather than
+      // calling an honest answer a forgery.
+      if (frontier.length > 0) {
+        throw new Unverifiable(`receipt tree is deeper than this verifier walks (${frontier.length} receipts left)`);
       }
 
       // Nothing may be present that the walk did not reach, and nothing reached may be absent.
@@ -310,6 +355,9 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
         }
         break;
       }
+      if (typeof result?.status === "string" || typeof result?.status === "undefined") {
+        throw new Unverifiable(`transaction is still executing (status: ${String(result?.status ?? "none")})`);
+      }
       const reportedStatus = Object.keys(result?.status ?? {})[0];
       const provenStatus = Object.keys(finalStatus ?? {})[0];
       if (reportedStatus !== provenStatus) {
@@ -325,7 +373,9 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
         detail: `${proven.value.height} · ${proven.head.approvedStakePercent}% stake`,
         // The transaction body is not covered: re-hashing it needs every action re-encoded, and a
         // deploy's view carries the code hash rather than the code.
-        scope: `transaction_outcome${provenReceipts.size ? `+${provenReceipts.size}_receipt(s)` : ""}+status;tx_body_unverified`,
+        scope: `transaction_outcome${provenReceipts.size ? `+${provenReceipts.size}_receipt(s)` : ""}+status;tx_body_unverified${
+          Array.isArray(result?.receipts) && result.receipts.length > 0 ? ";receipt_contents_unverified" : ""
+        }`,
       };
     }
 
@@ -338,6 +388,16 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
         if (!cachedHead) throw error;
         return run(await head(true));
       });
+      if (!proven.verified) {
+        // `value` is null for a failed proof as well as for a proven-absent key, so this check has to
+        // come first — otherwise a failed proof reads as "the key does not exist".
+        return {
+          verdict: "false",
+          trust: proven.trust,
+          detail: `proof failed: ${proven.checks.find((c) => !c.ok)?.name ?? "unknown"}`,
+          scope: "exact_key",
+        };
+      }
 
       // The proof covers exactly one trie path, so only the entry whose *decoded* key equals the
       // requested key is covered. Matching on base64 text would let a re-encoded key slip through.
@@ -504,6 +564,23 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
       detail = verified.detail;
       scope = verified.scope ?? "";
     } catch (error) {
+      if (error instanceof Unverifiable) {
+        // Pending, oversized, or no proof served: the caller gets the payload with an honest header
+        // rather than a fake failure — a wallet polling a fresh transaction must not see an error.
+        send(
+          res,
+          200,
+          { jsonrpc: "2.0", id: request?.id ?? null, result: upstreamBody },
+          {
+            "x-proven-verified": "unverified",
+            "x-proven-trust": trust,
+            "x-proven-method": String(method),
+            "x-proven-detail": encodeURIComponent(error.message),
+            ...(scope ? { "x-proven-scope": scope } : {}),
+          },
+        );
+        return;
+      }
       verdict = "false";
       detail = error instanceof Error ? error.message : String(error);
     }
