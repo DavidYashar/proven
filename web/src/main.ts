@@ -455,7 +455,10 @@ async function runVerify(): Promise<void> {
     const result = await verifyTransaction(hash, signer, { rpc: client, ...trustOptions(), resolvedHead });
     const outcome = result.value.outcome;
     const extra: Record<string, string> = {
-      "executed at": `block ${result.value.height}`,
+      // The block whose `outcome_root` commits this outcome — always exactly one block after the block
+      // that *included* the transaction, which is the height an explorer shows. Both are correct; this
+      // one is the one the proof is against.
+      "outcome committed in": `block ${result.value.height}`,
       status: Object.keys(outcome.status)[0] ?? "unknown",
       "block hash": result.value.blockHash,
     };

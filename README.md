@@ -28,6 +28,12 @@ transaction 6UxC9DcHMi63NpgSzWcYP5439Nf9iJS7vxzh1MrQqjLY
   VERIFIED
 ```
 
+The CLI also prints `committed in block N`. That is the block whose `outcome_root` commits this
+outcome, not the block that *included* the transaction: an explorer shows the inclusion height, and
+the commitment is always exactly one block later (measured across transactions). Both are correct, and
+the proof is against the latter — which is why the block hash printed beside it is the one that
+recomputes.
+
 ## Try it in 60 seconds
 
 Every step below is a self-contained "do X → see Y". Steps 2, 5 and 6 print `trust: anchored`,

@@ -118,7 +118,7 @@ async function cmdTx(hash: string, signer: string): Promise<number> {
     process.stdout.write(JSON.stringify({ ...asResult(result), outcome: result.value.outcome }, null, 2));
   } else {
     render(`transaction ${hash}`, result);
-    console.log(`  executed at   block ${result.value.height}`);
+    console.log(`  committed in  block ${result.value.height}`);
     console.log(`  status        ${Object.keys(result.value.outcome.status)[0]}`);
     const value = decodeSuccessValue(result.value.outcome);
     if (value !== null) console.log(`  return value  ${DIM}${value}${RESET}`);
