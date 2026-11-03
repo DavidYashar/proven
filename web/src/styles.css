@@ -119,6 +119,19 @@ h2 {
   margin-bottom: 16px;
 }
 
+/* The two cards a visitor actually came for — where to point, and what to copy — sit at the top and
+   are marked as the main path, so the demo cards read as optional. */
+.card.primary-path {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--line));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 5%, var(--panel)), var(--panel) 60%);
+}
+
+.card.primary-path + .card.primary-path {
+  margin-top: -17px;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
 .row {
   display: flex;
   align-items: center;

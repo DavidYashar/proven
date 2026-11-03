@@ -21,7 +21,7 @@
         <div class="trust-badge" id="trust-badge" data-trust="idle">idle</div>
       </header>
 
-      <section class="card">
+      <section class="card primary-path">
         <div class="row">
           <label for="provider">provider</label>
           <select id="provider"></select>
@@ -59,37 +59,7 @@
         <p class="lie-blurb" id="lie-blurb"></p>
       </section>
 
-      <section class="card">
-        <h2>Verify a transaction</h2>
-        <div class="inputs">
-          <input id="tx" type="text" placeholder="transaction hash" spellcheck="false" autocomplete="off" />
-          <input id="signer" type="text" placeholder="signer account id" spellcheck="false" autocomplete="off" />
-        </div>
-        <div class="actions">
-          <button id="verify" class="primary" type="button">Verify</button>
-          <button id="example" class="ghost" type="button">Use a recent transaction</button>
-          <button id="head" class="ghost" type="button">Check the head only</button>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>Verify contract storage</h2>
-        <p class="hint">
-          A trie proof binds the value to a state root: the endpoint cannot hand back different bytes
-          without breaking the path.
-        </p>
-        <div class="inputs">
-          <input id="account" type="text" placeholder="contract account id" spellcheck="false" autocomplete="off" value="mpc-prover-0_4_12.bridge.near" />
-          <input id="storage-key" type="text" placeholder="storage key (utf8)" spellcheck="false" autocomplete="off" value="STATE" />
-        </div>
-        <div class="actions">
-          <button id="verify-state" class="primary" type="button">Verify storage</button>
-        </div>
-      </section>
-
-      <section id="output" class="card output" hidden></section>
-
-      <section class="card" id="use-card">
+      <section class="card primary-path" id="use-card">
         <h2>Use this as your RPC</h2>
         <p class="hint">
           Your app must talk to a <em>verifying</em> endpoint, not straight to the provider. Either use
@@ -129,6 +99,36 @@
           </p>
         </div>
       </section>
+
+      <section class="card">
+        <h2>Verify a transaction</h2>
+        <div class="inputs">
+          <input id="tx" type="text" placeholder="transaction hash" spellcheck="false" autocomplete="off" />
+          <input id="signer" type="text" placeholder="signer account id" spellcheck="false" autocomplete="off" />
+        </div>
+        <div class="actions">
+          <button id="verify" class="primary" type="button">Verify</button>
+          <button id="example" class="ghost" type="button">Use a recent transaction</button>
+          <button id="head" class="ghost" type="button">Check the head only</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Verify contract storage</h2>
+        <p class="hint">
+          A trie proof binds the value to a state root: the endpoint cannot hand back different bytes
+          without breaking the path.
+        </p>
+        <div class="inputs">
+          <input id="account" type="text" placeholder="contract account id" spellcheck="false" autocomplete="off" value="mpc-prover-0_4_12.bridge.near" />
+          <input id="storage-key" type="text" placeholder="storage key (utf8)" spellcheck="false" autocomplete="off" value="STATE" />
+        </div>
+        <div class="actions">
+          <button id="verify-state" class="primary" type="button">Verify storage</button>
+        </div>
+      </section>
+
+      <section id="output" class="card output" hidden></section>
 
       <footer>
         <p>
