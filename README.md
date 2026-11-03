@@ -138,6 +138,19 @@ Against the proxy every proof-bearing call reports `ACT verified=true trust=anch
 RPC the same app reports `STOP verified=none`, because there is no `x-proven-*` header to read. That
 contrast is the product.
 
+**An unmodified near-api-js app** is in [`examples/near-api-app.mjs`](./examples/near-api-app.mjs) —
+the same `JsonRpcProvider`, one URL swapped:
+
+```bash
+NEAR_RPC_URL=http://localhost:8080 node examples/near-api-app.mjs
+```
+
+It reads a block, a balance and a `ft_total_supply` call, then the same `view_state` with
+`include_proof`. The honest result is the interesting part: `block` is `self` (header hash recomputed),
+the `query` reads are `unverified` (near-api-js never asks for a proof), and only the call that asks for
+a proof reaches `verified=true trust=anchored`. That is not a bug to hide — it is the measurement this
+tool exists to make, and the header is what lets an app treat the two differently.
+
 ## Tracks it leans on
 
 `open` (primary), `privacy` (verification without asking anyone to trust a server), `security`
@@ -365,6 +378,12 @@ headers must not be accused of forging a chain it never answered about.
 |---|---|---|
 | full proof | `tx`, `EXPERIMENTAL_tx_status` (transaction outcome, **every receipt walked from it**, and the derived `status`), `query` `view_state` + `include_proof` (exact key), `block` (header hash recomputed, `scope: header_only`) | `x-proven-verified: true` / `self`, trust `anchored`/`quorum` |
 | none | everything else | `x-proven-verified: unverified` — or `rejected` in strict mode |
+
+`false` means exactly one thing: **the answer contradicts the chain**, and the proxy refuses to hand
+back the payload. It is not used for anything weaker. An endpoint that never answered, and an endpoint
+that answered with its own JSON-RPC error (`UNKNOWN_BLOCK`, `TOO_LARGE_CONTRACT_STATE`,
+`MethodNotFound`) are both `unverified` — forwarded with the reason in `x-proven-detail`, because
+nothing was proven either way and calling it a lie would be a false verdict.
 
 `x-proven-scope` says exactly what was checked, e.g.
 `transaction_outcome+2_receipt(s)+status;tx_body_unverified`. Two things are named rather than

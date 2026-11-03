@@ -197,3 +197,31 @@ test("unsupported methods are counted consistently in both proxy modes", async (
     assert.equal(proxy.counters.failed, 0);
   }
 });
+
+test("a node's own error is forwarded as unverified, never as a contradiction", async (t) => {
+  const proxy = await harness(t);
+  // The stub answers this with a JSON-RPC error, exactly as a node does for "state too large" or
+  // "unknown block". `false` would tell the caller the chain disagrees, which nothing established.
+  const response = await proxy.request("state_too_large");
+  assert.equal(response.body.error?.code, -32601);
+  assert.equal(response.verdict, "unverified");
+  assert.equal(proxy.counters.failed, 0);
+  assert.equal(proxy.counters.unverified, 1);
+});
+
+test("an endpoint that never answered is a transport failure, not a verdict", async (t) => {
+  // Port 1 is closed: connection refused, so nothing is proven either way.
+  const proxy = createProvenProxy({ upstream: "http://127.0.0.1:1", checkpoint });
+  const server = await proxy.listen(0, "127.0.0.1");
+  t.after(() => close(server));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const response = await fetch(`http://127.0.0.1:${address.port}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "block", params: { finality: "final" } }),
+  });
+  assert.equal(response.status, 502);
+  assert.equal(response.headers.get("x-proven-verified"), "unverified");
+  assert.equal(proxy.counters.failed, 0);
+});

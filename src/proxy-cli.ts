@@ -34,8 +34,20 @@ const proxy = createProvenProxy({
 });
 
 proxy.listen(port).then(() => {
-  console.log(`proven proxy listening on :${port}`);
-  console.log(`  upstream   ${upstream.join(", ")}`);
-  console.log(`  checkpoint ${checkpoint ? `epoch ${checkpoint.epochId.slice(0, 8)}… (${checkpoint.validators.length} producers)` : "none"}`);
-  console.log(`  mode       ${strict ? "strict (unverifiable methods are refused)" : "observe (everything is forwarded, verdicts in headers)"}`);
+  const url = `http://localhost:${port}`;
+  console.log(`proven proxy is live on ${url}`);
+  console.log(`  upstream    ${upstream.join(", ")}`);
+  console.log(
+    `  checkpoint  ${checkpoint ? `epoch ${checkpoint.epochId.slice(0, 8)}… (${checkpoint.validators.length} producers)` : "none — trust will be rpc-asserted"}`,
+  );
+  console.log(
+    `  mode        ${strict ? "strict (anything unverifiable is refused)" : "observe (everything is forwarded, verdicts in headers)"}`,
+  );
+  console.log("");
+  console.log("Point your app's RPC at:");
+  console.log(`  ${url}`);
+  console.log("Then read the verdict from the response headers:");
+  console.log("  x-proven-verified: true | self | unverified | false   (x-proven-trust, x-proven-detail)");
+  console.log("Health and counters:");
+  console.log(`  curl ${url}/status`);
 });

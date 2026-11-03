@@ -17,7 +17,9 @@ import { bytesToBase64, bytesToHex } from "./bytes.js";
  * `proven proxy` — a drop-in NEAR JSON-RPC endpoint that verifies what it forwards.
  *
  * Point any existing client at it (one URL change) and get:
- *   - `x-proven-verified: true|false|self` on every response
+ *   - `x-proven-verified: true|self|unverified|false` on every response, where `false` means only one
+ *     thing: the answer contradicts the chain. An endpoint that never answered, or answered with an
+ *     error, is `unverified` — nothing was proven either way.
  *   - `x-proven-trust: anchored|quorum|rpc-asserted`
  *   - in `strict` mode, an error for anything that cannot be verified (unsupported methods, and
  *     answers that are pending or have no proof) instead of the unproven payload
@@ -557,17 +559,27 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
       }
     }
     if (!envelope) {
-      send(res, 502, rpcError(request?.id, -32000, `upstream error: ${errors.join("; ")}`), { "x-proven-verified": "false" });
+      // Nothing answered. That is a transport failure, not a verdict on the chain: `false` would accuse
+      // the endpoint of lying when it never replied at all.
+      counters.unverified++;
+      send(res, 502, rpcError(request?.id, -32000, `upstream error: ${errors.join("; ")}`), {
+        "x-proven-verified": "unverified",
+        "x-proven-trust": "none",
+        "x-proven-detail": encodeURIComponent("no upstream answered"),
+      });
       return;
     }
     if (envelope.error) {
-      // The node's own answer ("unknown block", "method not found") is forwarded verbatim: it is
-      // data the caller needs, not a proxy failure.
+      // The node's own answer ("unknown block", "method not found", "state too large") is forwarded
+      // verbatim: it is data the caller needs, not a proxy failure — and certainly not a contradiction.
+      counters.unverified++;
       send(res, 200, { jsonrpc: "2.0", id: request?.id ?? null, error: envelope.error }, {
-        "x-proven-verified": "false",
+        "x-proven-verified": "unverified",
         "x-proven-trust": "none",
         "x-proven-method": String(method),
-        "x-proven-detail": encodeURIComponent(String(envelope.error?.cause?.info?.error_message ?? envelope.error?.message ?? "upstream error")),
+        "x-proven-detail": encodeURIComponent(
+          `upstream error: ${String(envelope.error?.cause?.name ?? envelope.error?.message ?? "error")}`,
+        ),
       });
       return;
     }
