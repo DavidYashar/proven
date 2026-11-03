@@ -29,7 +29,7 @@
     "prepare": "node scripts/prepare.mjs",
     "dev": "tsx src/cli.ts",
     "verify": "tsx src/cli.ts",
-    "test": "tsx tests/vectors.test.ts && tsx tests/state-attack.test.ts && tsx tests/bridge.test.ts && tsx tests/proxy-offline.test.ts",
+    "test": "tsx tests/vectors.test.ts && tsx tests/state-attack.test.ts && tsx tests/bridge.test.ts && tsx tests/proxy-offline.test.ts && tsx tests/proxy-pin.test.ts",
     "test:attack": "tsx tests/forge-head.ts",
     "test:live": "tsx tests/demo.ts",
     "test:all": "npm test && npm run test:attack && npm run test:live",
