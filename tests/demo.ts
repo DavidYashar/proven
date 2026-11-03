@@ -64,12 +64,22 @@ function startLiar(lie: Lie, port: number): Promise<Server> {
 
 async function pickSampleTransaction(): Promise<{ hash: string; signer: string }> {
   const head = await upstream("block", { finality: "final" });
-  for (let back = 6; back < 20; back++) {
-    const block = await upstream("block", { block_id: Number(head.result.header.height) - back });
-    for (let shard = 0; shard < block.result.chunks.length; shard++) {
+  const headHeight = Number(head.result?.header?.height);
+  if (!Number.isFinite(headHeight)) {
+    throw new Error(`could not read the head: ${JSON.stringify(head.error ?? head).slice(0, 120)}`);
+  }
+  // A public endpoint throttles under repeated use; keep looking instead of dying on one bad answer.
+  for (let back = 6; back < 60; back++) {
+    const block = await upstream("block", { block_id: headHeight - back }).catch(() => null);
+    const chunks = block?.result?.chunks;
+    if (!Array.isArray(chunks)) {
+      await new Promise((r) => setTimeout(r, 800));
+      continue;
+    }
+    for (const chunkInfo of chunks) {
       let chunk;
       try {
-        chunk = await upstream("chunk", { block_id: block.result.header.hash, shard_id: shard });
+        chunk = await upstream("chunk", { block_id: block.result.header.hash, shard_id: chunkInfo.shard_id });
       } catch {
         continue;
       }
@@ -77,7 +87,7 @@ async function pickSampleTransaction(): Promise<{ hash: string; signer: string }
       if (tx) return { hash: tx.hash, signer: tx.signer_id };
     }
   }
-  throw new Error("could not find a sample transaction");
+  throw new Error("could not find a sample transaction (the endpoint may be rate-limiting; try again shortly)");
 }
 
 const GREEN = "\x1b[32m";

@@ -177,7 +177,11 @@ test("lying upstream: a rewritten receipt is refused, not forwarded", async () =
     });
     // The transaction outcome is honest here; only the receipt — where the contract-call result lives —
     // is rewritten. That must not pass.
-    assert.equal(response.headers.get("x-proven-verified"), "false");
+    assert.equal(
+      response.headers.get("x-proven-verified"),
+      "false",
+      `scope=${response.headers.get("x-proven-scope")} detail=${decodeURIComponent(response.headers.get("x-proven-detail") ?? "")}`,
+    );
     assert.ok(response.body.error, "the payload must not be handed back");
   } finally {
     server.close();

@@ -150,9 +150,25 @@ function renderHeadOnly(resolved: Head): void {
   setBadge(resolved.trust, verified);
 }
 
+/**
+ * A transport problem is not a verdict. When the endpoint is unreachable or throttling, saying
+ * "VERIFICATION FAILED" would accuse the chain of lying when nothing was checked at all.
+ */
+const looksLikeTransport = (message: string): boolean =>
+  /did not serve|failed to fetch|no rpc could|rate limit|too many requests|429|timed out|abort|network/i.test(
+    message,
+  );
+
 function renderError(message: string): void {
   el.output.hidden = false;
-  el.output.innerHTML = `<p class="verdict" data-ok="false">VERIFICATION FAILED</p><p class="error">${esc(message)}</p>`;
+  const transport = looksLikeTransport(message);
+  el.output.innerHTML = `<p class="verdict" data-ok="false" data-kind="${transport ? "transport" : "verdict"}">${
+    transport ? "NOT VERIFIED — the endpoint did not answer" : "VERIFICATION FAILED"
+  }</p><p class="error">${esc(message)}</p>${
+    transport
+      ? `<p class="note">Nothing was proven either way: the endpoint was unreachable or throttling. Try another endpoint, or wait a moment — a public RPC rate-limits under repeated use.</p>`
+      : ""
+  }`;
   setBadge("failed", false);
 }
 

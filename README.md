@@ -382,6 +382,13 @@ endpoint listed on [docs.near.org/api/rpc/providers](https://docs.near.org/api/r
 Anything runnable as a nearcore node is usable, keyed endpoints included; the failures above are
 gateways, not nodes. FastNear's archival endpoint is the one that matters for older history.
 
+**Rate limits are the real operational constraint.** The public endpoints throttle, and a throttled
+answer arrives *without* CORS headers, so a browser reports it as a CORS failure rather than a 429.
+Repeated clicking in the demo app will eventually hit this. The app now separates the two cases —
+"NOT VERIFIED — the endpoint did not answer" is a transport problem, never a verdict — and for a
+recorded demo the safest setup is your own proxy, or a short pause between clicks. `UPSTREAM_RPC`
+takes a comma-separated list for exactly this reason.
+
 Deploy both services with [render.yaml](./render.yaml) (Blueprint → this repo): a Node web service
 for the proxy and a static site for the app, with `VITE_DEFAULT_RPC` pointing the app at the proxy.
 
