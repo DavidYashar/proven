@@ -269,6 +269,73 @@ button.ghost {
   font-family: var(--mono);
 }
 
+/* ---- "use this as your RPC" ---- */
+.use-option {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.015);
+}
+.use-head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.use-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.use-note {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.use-value {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.use-value code {
+  flex: 1 1 320px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.use-cmd {
+  margin: 0 0 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text);
+}
+.use-warn {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #ffb4a8;
+  border-left: 2px solid #ff6b5a;
+  padding-left: 9px;
+}
+button[data-copied="true"] {
+  color: #9ef0b8;
+  border-color: #4fd07d;
+}
+
 .output h3 {
   margin: 0 0 4px;
   font-size: 13px;

@@ -33,7 +33,30 @@ const el = {
   checkpoint: $<HTMLElement>("checkpoint-status"),
   repin: $<HTMLButtonElement>("repin"),
   requireAnchor: $<HTMLInputElement>("require-anchor"),
+  hostedUrl: $<HTMLElement>("hosted-url"),
+  hostedWarn: $<HTMLElement>("hosted-warn"),
+  copyHosted: $<HTMLButtonElement>("copy-hosted"),
+  runCmd: $<HTMLElement>("run-cmd"),
+  upstreamNote: $<HTMLElement>("upstream-note"),
+  upstreamWarn: $<HTMLElement>("upstream-warn"),
+  copyCommand: $<HTMLButtonElement>("copy-command"),
+  copyLocal: $<HTMLButtonElement>("copy-local"),
+  localUrl: $<HTMLElement>("local-url"),
 };
+
+/**
+ * The endpoint an app should point at. It is a *verifying* endpoint, so it must be either our
+ * deployment or a proxy the user runs — never the raw provider the page happens to be checking.
+ */
+const HOSTED_URL = ((import.meta as any).env?.VITE_PROXY_URL as string | undefined) ?? "https://proven-proxy.onrender.com";
+const LOCAL_URL = "http://localhost:8080";
+
+/**
+ * What the last check said about the provider currently in the field. `bad` means it could not serve a
+ * light client proof — the honest advice is then "do not configure your proxy with this", so the UI
+ * says so instead of offering a copy button that would mislead.
+ */
+let upstreamCheck: "unknown" | "ok" | "bad" = "unknown";
 
 const STORAGE_KEY = "proven.checkpoint.v1";
 
@@ -269,8 +292,10 @@ async function runVerify(): Promise<void> {
     const value = decodeSuccessValue(outcome);
     if (value !== null) extra["return value"] = value;
     renderResult(`transaction ${hash.slice(0, 16)}…`, result, extra);
+    markUpstream(result.verified ? "ok" : "bad");
   } catch (error) {
     renderError(error instanceof Error ? error.message : String(error));
+    markUpstream("bad");
   } finally {
     setBusy(false);
   }
@@ -308,8 +333,10 @@ async function runState(): Promise<void> {
       ${notes.length ? `<div class="note">${notes.map(esc).join("<br />")}</div>` : ""}
     `;
     setBadge(result.trust, result.verified);
+    markUpstream(result.verified ? "ok" : "bad");
   } catch (error) {
     renderError(error instanceof Error ? error.message : String(error));
+    markUpstream("bad");
   } finally {
     setBusy(false);
   }
@@ -319,9 +346,13 @@ async function runHead(): Promise<void> {
   if (busy) return;
   setBusy(true);
   try {
-    renderHeadOnly(await headFor(rpc()));
+    const resolved = await headFor(rpc());
+    const verified = resolved.checks.every((c) => c.ok);
+    renderHeadOnly(resolved);
+    markUpstream(verified ? "ok" : "bad");
   } catch (error) {
     renderError(error instanceof Error ? error.message : String(error));
+    markUpstream("bad");
   } finally {
     setBusy(false);
   }
@@ -416,6 +447,94 @@ async function repin(): Promise<void> {
   }
 }
 
+// ------------------------------------------------------------------ "use it" card
+
+function upstreamValue(): string {
+  return el.rpc.value.trim() || "https://free.rpc.fastnear.com";
+}
+
+/**
+ * Records what the last check said about the provider in the field, so the "copy this into your app"
+ * advice can be withheld when that provider just failed to prove anything.
+ */
+function markUpstream(state: "ok" | "bad"): void {
+  upstreamCheck = state;
+  updateUseCard();
+}
+
+function updateUseCard(): void {
+  const upstream = upstreamValue();
+  const normalize = (url: string) => url.replace(/\/+$/, "");
+  // A verifying endpoint is already the answer: pointing a proxy at a proxy would only add a hop.
+  const alreadyVerifying = [HOSTED_URL, LOCAL_URL].some((url) => normalize(url) === normalize(upstream));
+
+  el.hostedUrl.textContent = HOSTED_URL;
+
+  if (alreadyVerifying) {
+    el.localUrl.textContent = upstream;
+    el.runCmd.textContent =
+      "# nothing to run: this endpoint already verifies\n" + `# paste it into your app as it is\nNEAR_RPC_URL=${upstream}`;
+    el.upstreamNote.textContent = "that endpoint already verifies — use it as it is";
+    el.upstreamWarn.hidden = true;
+    el.copyCommand.disabled = true;
+    el.copyLocal.disabled = false;
+    return;
+  }
+
+  el.localUrl.textContent = LOCAL_URL;
+  el.runCmd.textContent = `UPSTREAM_RPC=${upstream} node dist/proxy-cli.js\n# then: NEAR_RPC_URL=${LOCAL_URL}`;
+  el.upstreamNote.textContent =
+    upstreamCheck === "ok"
+      ? "that provider verified a moment ago"
+      : upstreamCheck === "bad"
+        ? "that provider did not verify"
+        : "using the endpoint checked above";
+  el.upstreamWarn.hidden = upstreamCheck !== "bad";
+  el.copyCommand.disabled = upstreamCheck === "bad";
+  el.copyLocal.disabled = upstreamCheck === "bad";
+}
+
+/** Copy, with a visible confirmation and a fallback for browsers without clipboard permission. */
+async function copyText(text: string, button: HTMLButtonElement): Promise<void> {
+  const label = button.textContent ?? "Copy";
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Clipboard API needs a secure context; selecting the text still lets the user press Ctrl+C.
+    const range = document.createRange();
+    const pre = document.createElement("pre");
+    pre.textContent = text;
+    document.body.append(pre);
+    range.selectNodeContents(pre);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    pre.remove();
+  }
+  button.textContent = "Copied";
+  button.dataset.copied = "true";
+  setTimeout(() => {
+    button.textContent = label;
+    delete button.dataset.copied;
+  }, 1500);
+}
+
+/**
+ * Is the hosted endpoint awake? A free instance sleeps when idle, so the card must not promise a URL
+ * that is not answering right now.
+ */
+async function probeHosted(): Promise<void> {
+  try {
+    const response = await fetch(`${HOSTED_URL.replace(/\/+$/, "")}/status`, {
+      signal: AbortSignal.timeout(9_000),
+    });
+    const body: any = await response.json();
+    el.hostedWarn.hidden = Boolean(body?.service);
+  } catch {
+    el.hostedWarn.hidden = false;
+  }
+}
+
 // ------------------------------------------------------------------ wiring
 
 for (const lie of LIES) {
@@ -453,12 +572,26 @@ el.tx.addEventListener("keydown", (event) => {
   if ((event as KeyboardEvent).key === "Enter") void runVerify();
 });
 
+// The "use it" card follows whatever provider is in the field.
+el.rpc.addEventListener("input", () => {
+  upstreamCheck = "unknown";
+  updateUseCard();
+});
+el.copyHosted.addEventListener("click", () => void copyText(HOSTED_URL, el.copyHosted));
+el.copyLocal.addEventListener("click", () => void copyText(LOCAL_URL, el.copyLocal));
+el.copyCommand.addEventListener("click", () => void copyText(el.runCmd.textContent ?? "", el.copyCommand));
+
 syncBlurb();
+updateUseCard();
+void probeHosted();
 
 // A deployment can default to a verifying proxy instead of a raw RPC (see render.yaml). This must be
 // applied before the first status check, or that check probes the endpoint baked into the HTML.
 const defaultRpc = (import.meta as any).env?.VITE_DEFAULT_RPC as string | undefined;
-if (defaultRpc) el.rpc.value = defaultRpc;
+if (defaultRpc) {
+  el.rpc.value = defaultRpc;
+  updateUseCard();
+}
 
 void refreshCheckpointStatus();
 

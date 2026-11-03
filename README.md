@@ -329,6 +329,20 @@ x-proven-detail: 221536521 · 76.54% stake
 The payload is **byte-for-byte the upstream's result**, so `near-api-js`, `fetch`, and wallet code
 keep working untouched. The verdict rides in headers.
 
+**Which URL do I paste into my app?** Not the provider — a *verifying* endpoint. That is either the
+deployment you run, or a proxy you start yourself:
+
+```bash
+UPSTREAM_RPC=https://free.rpc.fastnear.com node dist/proxy-cli.js   # provider of your choice
+# then, in your app:  NEAR_RPC_URL=http://localhost:8080
+```
+
+The demo page spells this out: check a provider there, and if it verifies, it generates that exact
+command for you with your provider already filled in, next to a copy button for the URL. If the
+provider *fails* the check, it says so and withholds the copy button — a provider that cannot answer
+a light client proof cannot be verified, and pointing an app at one would give you back exactly the
+blind trust this tool exists to remove.
+
 | Verifiability | Methods | Verdict header |
 |---|---|---|
 | full proof | `tx`, `EXPERIMENTAL_tx_status` (transaction outcome, **every receipt walked from it**, and the derived `status`), `query` `view_state` + `include_proof` (exact key), `block` (header hash recomputed, `scope: header_only`) | `x-proven-verified: true` / `self`, trust `anchored`/`quorum` |
@@ -441,6 +455,12 @@ npm run web:build   # static bundle in web/dist (~89 kB, ~34 kB gzipped)
 A single static page — no backend, no server of ours. Paste a transaction hash, or press
 **Use a recent transaction**, and the checks run in the tab: proofs are fetched from whichever RPC
 you point at and verified locally against ed25519 signatures.
+
+The page also answers the operational question — *what URL do I give my app?* — with a **"Use this as
+your RPC"** card: our hosted endpoint with a copy button (and an honest warning when it is asleep),
+plus the exact command to run the proxy against whatever provider you just checked. If that provider
+fails the check, the copy buttons are withheld rather than handing you a URL that cannot verify.
+`VITE_PROXY_URL` sets the address it offers.
 
 The **endpoint behaviour** selector turns the same endpoint hostile *inside the page* (it wraps
 `fetch` and tampers with responses before the verifier sees them), so the demo needs no rogue

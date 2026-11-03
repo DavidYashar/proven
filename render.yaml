@@ -37,6 +37,10 @@ services:
       # this at the proxy service URL only if you want the app to go through the verifier too.
       - key: VITE_DEFAULT_RPC
         value: https://free.rpc.fastnear.com
+      # The URL the page offers as "use this as your RPC". Set it to this proxy service's own
+      # address once Render assigns one, e.g. https://proven-proxy.onrender.com
+      - key: VITE_PROXY_URL
+        value: https://proven-proxy.onrender.com
     routes:
       - type: rewrite
         source: /*
