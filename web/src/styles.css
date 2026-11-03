@@ -436,11 +436,6 @@ button[data-copied="true"] {
   background: var(--bg);
 }
 
-/* Two options stacked share one hairline instead of two, the way the site frames a grid of cells. */
-.use-option + .use-option {
-  margin-top: -1px;
-}
-
 .use-head {
   display: flex;
   gap: 10px;

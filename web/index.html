@@ -64,29 +64,14 @@
       <section class="card primary-path" id="use-card">
         <h2>Use this as your RPC</h2>
         <p class="hint">
-          Your app must talk to a <em>verifying</em> endpoint, not straight to the provider. Either use
-          ours, or run the proxy yourself against the provider you just checked above — the verdicts
-          are what your app reads.
+          Your app must talk to a <em>verifying</em> endpoint, not straight to the provider. That is the
+          proxy, running on your machine, pointed at the provider you checked above — the verdicts ride
+          in response headers, and what your app reads is one of them.
         </p>
 
         <div class="use-option">
           <div class="use-head">
-            <span class="use-title">Hosted by us</span>
-            <span class="use-note">verifies against fastnear, with an archival failover</span>
-          </div>
-          <div class="use-value">
-            <code id="hosted-url">…</code>
-            <button id="copy-hosted" class="ghost" type="button">Copy</button>
-          </div>
-          <p class="use-warn" id="hosted-warn" hidden>
-            The hosted endpoint is not answering right now (a free instance sleeps when idle — the
-            first request can take a minute). Use the option below until it wakes.
-          </p>
-        </div>
-
-        <div class="use-option">
-          <div class="use-head">
-            <span class="use-title">Run it with your own provider</span>
+            <span class="use-title">Run the proxy</span>
             <span class="use-note" id="upstream-note">using the endpoint checked above</span>
           </div>
           <pre class="use-cmd" id="run-cmd">…</pre>

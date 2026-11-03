@@ -38,9 +38,6 @@ const el = {
   checkpoint: $<HTMLElement>("checkpoint-status"),
   repin: $<HTMLButtonElement>("repin"),
   requireAnchor: $<HTMLInputElement>("require-anchor"),
-  hostedUrl: $<HTMLElement>("hosted-url"),
-  hostedWarn: $<HTMLElement>("hosted-warn"),
-  copyHosted: $<HTMLButtonElement>("copy-hosted"),
   runCmd: $<HTMLElement>("run-cmd"),
   upstreamNote: $<HTMLElement>("upstream-note"),
   upstreamWarn: $<HTMLElement>("upstream-warn"),
@@ -54,10 +51,10 @@ const el = {
 };
 
 /**
- * The endpoint an app should point at. It is a *verifying* endpoint, so it must be either our
- * deployment or a proxy the user runs — never the raw provider the page happens to be checking.
+ * The endpoint an app should point at. It is a *verifying* endpoint, so it must be the proxy the user
+ * runs — never the raw provider the page happens to be checking. There is no hosted deployment: this
+ * is a repository, so "run it yourself" is the whole answer.
  */
-const HOSTED_URL = ((import.meta as any).env?.VITE_PROXY_URL as string | undefined) ?? "https://proven-proxy.onrender.com";
 const LOCAL_URL = "http://localhost:8080";
 
 /**
@@ -615,9 +612,7 @@ function updateUseCard(): void {
   const upstream = upstreamValue();
   const normalize = (url: string) => url.replace(/\/+$/, "");
   // A verifying endpoint is already the answer: pointing a proxy at a proxy would only add a hop.
-  const alreadyVerifying = [HOSTED_URL, LOCAL_URL].some((url) => normalize(url) === normalize(upstream));
-
-  el.hostedUrl.textContent = HOSTED_URL;
+  const alreadyVerifying = normalize(LOCAL_URL) === normalize(upstream);
 
   if (alreadyVerifying) {
     el.localUrl.textContent = upstream;
@@ -632,12 +627,7 @@ function updateUseCard(): void {
 
   el.localUrl.textContent = LOCAL_URL;
   el.runCmd.textContent = `UPSTREAM_RPC=${upstream} node dist/proxy-cli.js\n# then: NEAR_RPC_URL=${LOCAL_URL}`;
-  el.upstreamNote.textContent =
-    upstreamCheck === "ok"
-      ? "that provider verified a moment ago"
-      : upstreamCheck === "bad"
-        ? "that provider did not verify"
-        : "using the endpoint checked above";
+  el.upstreamNote.textContent = `passing ${upstream} to your own proxy`;
   el.upstreamWarn.hidden = upstreamCheck !== "bad";
   el.copyCommand.disabled = upstreamCheck === "bad";
   el.copyLocal.disabled = upstreamCheck === "bad";
@@ -666,22 +656,6 @@ async function copyText(text: string, button: HTMLButtonElement): Promise<void> 
     button.textContent = label;
     delete button.dataset.copied;
   }, 1500);
-}
-
-/**
- * Is the hosted endpoint awake? A free instance sleeps when idle, so the card must not promise a URL
- * that is not answering right now.
- */
-async function probeHosted(): Promise<void> {
-  try {
-    const response = await fetch(`${HOSTED_URL.replace(/\/+$/, "")}/status`, {
-      signal: AbortSignal.timeout(9_000),
-    });
-    const body: any = await response.json();
-    el.hostedWarn.hidden = Boolean(body?.service);
-  } catch {
-    el.hostedWarn.hidden = false;
-  }
 }
 
 // ------------------------------------------------------------------ provider picker
@@ -746,6 +720,8 @@ async function probeCurrentEndpoint(): Promise<ProbeResult | null> {
   try {
     const result = await probeProvider(url, labelFor(url), pinnedAnchor());
     renderEndpointStatus(result);
+    // The "use it" card must not hand out a command for an endpoint that just failed this check.
+    markUpstream(result.status === "ok" ? "ok" : "bad");
     el.providerHint.textContent =
       result.status === "ok"
         ? `${result.label} serves light client blocks — "Check the head only" verifies it end to end`
@@ -828,16 +804,14 @@ el.provider.addEventListener("change", () => {
   void useProvider(el.provider.value);
 });
 el.checkEndpoint.addEventListener("click", () => void probeCurrentEndpoint());
-el.copyHosted.addEventListener("click", () => void copyText(HOSTED_URL, el.copyHosted));
 el.copyLocal.addEventListener("click", () => void copyText(LOCAL_URL, el.copyLocal));
 el.copyCommand.addEventListener("click", () => void copyText(el.runCmd.textContent ?? "", el.copyCommand));
 
 syncBlurb();
 updateUseCard();
-void probeHosted();
 
-// A deployment can default to a verifying proxy instead of a raw RPC (see render.yaml). This must be
-// applied before the first status check, or that check probes the endpoint baked into the HTML.
+// Optional: bake a default endpoint into the build (VITE_DEFAULT_RPC), for someone who hosts this page
+// next to their own proxy. Applied before the first status check, or that check probes the HTML's one.
 const defaultRpc = (import.meta as any).env?.VITE_DEFAULT_RPC as string | undefined;
 if (defaultRpc) {
   el.rpc.value = defaultRpc;

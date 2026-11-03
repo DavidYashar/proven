@@ -51,8 +51,6 @@ which needs a pin. The shipped pin walks itself forward, so a stale one still en
    stored state" and click *Verify* again → `REJECTED`.
 8. **Leave the pin alone and it still works** — wait out an epoch; the next run walks the pin
    forward ("stale pin walked forward 1 epoch(s)") and prints `trust: anchored` again.
-9. **Deploy it** — push the repo and apply `render.yaml` (one Node service for the proxy, one static
-   site for the app).
 
 A machine can also import the library directly:
 
@@ -329,8 +327,8 @@ x-proven-detail: 221536521 · 76.54% stake
 The payload is **byte-for-byte the upstream's result**, so `near-api-js`, `fetch`, and wallet code
 keep working untouched. The verdict rides in headers.
 
-**Which URL do I paste into my app?** Not the provider — a *verifying* endpoint. That is either the
-deployment you run, or a proxy you start yourself:
+**Which URL do I paste into my app?** Not the provider — a *verifying* endpoint, which is a proxy you
+run yourself. There is no hosted endpoint to depend on:
 
 ```bash
 UPSTREAM_RPC=https://free.rpc.fastnear.com node dist/proxy-cli.js   # provider of your choice
@@ -454,8 +452,10 @@ Repeated clicking in the demo app will eventually hit this. The app now separate
 recorded demo the safest setup is your own proxy, or a short pause between clicks. `UPSTREAM_RPC`
 takes a comma-separated list for exactly this reason.
 
-Deploy both services with [render.yaml](./render.yaml) (Blueprint → this repo): a Node web service
-for the proxy and a static site for the app, with `VITE_DEFAULT_RPC` pointing the app at the proxy.
+Deploying is optional and out of scope for this repository: the proxy is
+`UPSTREAM_RPC=… node dist/proxy-cli.js` on whatever host you like, and the page is a static build you
+can serve next to it (`VITE_DEFAULT_RPC` points the app at your proxy). Nothing here depends on a
+service we run.
 
 The proxy is Node-only, so it is published on a separate entry point and never reaches the browser
 bundle:
@@ -484,10 +484,10 @@ the same offline and sends nothing to a third party. The semantic colours — ve
 not answered — are ours, because on this page they mean something specific.
 
 The page also answers the operational question — *what URL do I give my app?* — with a **"Use this as
-your RPC"** card: our hosted endpoint with a copy button (and an honest warning when it is asleep),
-plus the exact command to run the proxy against whatever provider you just checked. If that provider
-fails the check, the copy buttons are withheld rather than handing you a URL that cannot verify.
-`VITE_PROXY_URL` sets the address it offers.
+your RPC"** card: the exact command to run the proxy against whatever provider you just checked, and
+the `http://localhost:8080` URL to paste into your app once it is running. If that provider fails the
+check, the copy buttons are withheld rather than handing you a URL that cannot verify. There is no
+hosted endpoint — the card never points at a service we run, because there isn't one.
 
 The endpoint itself is a **provider picker**: *check this endpoint* asks the one endpoint in the field
 whether it serves light client blocks for the pinned epoch, and choosing a provider verifies the head
@@ -520,8 +520,9 @@ no checkpoint        → trust rpc-asserted, verified=true    ← every signatur
 pinned checkpoint    → 0% of 556906176M NEAR, 3 matched no key
 ```
 
-Deploying is `npm run web:build` and uploading `web/dist` to any static host (Cloudflare Pages,
-Netlify, Vercel, GitHub Pages). `base: "./"` is set so subpaths work.
+Serving the page is `npm run web:build` and uploading `web/dist` to any static host (Cloudflare Pages,
+Netlify, Vercel, GitHub Pages). `base: "./"` is set so subpaths work. Nothing here needs a server we
+run: the page is static and the proxy is a process you start.
 
 Inside the app, "re-pin current set" first walks a pin the page already trusts (the stored one, then
 the shipped `checkpoints/mainnet.json`) forward to the current epoch, checking each epoch's
