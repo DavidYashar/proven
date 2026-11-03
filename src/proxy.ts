@@ -590,6 +590,7 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
         );
         return;
       }
+      counters.unverified++;
       send(
         res,
         200,

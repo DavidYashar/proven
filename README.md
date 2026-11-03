@@ -34,7 +34,7 @@ Every step below is a self-contained "do X → see Y". Steps 2, 5 and 6 print `t
 which needs a pin. The shipped pin walks itself forward, so a stale one still ends up `anchored`;
 `npm run checkpoint` just re-pins without the walk.
 
-1. **Install and run the offline vectors** (no network): `npm ci && npm test` → `pass 30, fail 0`.
+1. **Install and run the offline tests** (no network): `npm ci && npm test` → `pass 39, fail 0`.
 2. **Verify a real transaction** — `npx tsx src/cli.ts tx <hash> <signer>` (get a `<hash> <signer>`
    pair from `npx tsx src/cli.ts find <height>`) → every check prints `✓`, verdict `VERIFIED`.
 3. **Watch it catch a liar** — `npm run test:attack` → an RPC that invents its own validator set is
@@ -239,13 +239,20 @@ verifies against the producer set it can fetch, reporting `rpc-asserted`.
 ## Demo: catching a lying RPC
 
 ```bash
-npm test            # 22 offline vector tests, no network
+npm test            # 39 offline vector, state, bridge and proxy tests
+npm run test:proxy  # 10 network-dependent proxy tests
 npm run test:attack # a forged validator set that only a checkpoint can catch
 npm run test:live   # an RPC that tampers with responses on the wire
 npx tsx scripts/bench.ts      # latency of the proxy versus a direct RPC
 npx tsx scripts/proof_depth.ts # how far back a proof can be obtained
 npx tsx scripts/provider_matrix.ts # which providers a verifier can actually use
 ```
+
+The offline proxy tests replay recorded, signed mainnet proofs through a local HTTP server.
+They cover pending versus settled snapshots, absent proofs, strict-mode refusal, identity
+contradictions, receipt padding, and counters without relying on a public endpoint.
+The live proxy suite uses `UPSTREAM_RPC` when set; public-provider rate limits can fail a run,
+so avoid concurrent live suites and inspect upstream errors rather than treating them as proof failures.
 
 ```text
 honest RPC                         → accepted
@@ -534,8 +541,8 @@ hit them:
 
 ## Status
 
-Verified against live mainnet: 26 offline vector tests, 6 proxy tests, live tamper demos, a
-receipt outcome with 5 log hashes, a failed outcome, a contract-storage proof anchored through
+Validation includes 39 offline tests and 10 network-dependent proxy tests. Mainnet exercises cover
+live tamper demos, a receipt outcome with 5 log hashes, a failed outcome, a contract-storage proof anchored through
 `inner_rest` and `chunk_headers_root`, and outcome proofs up to ~100,000 blocks deep. Historical
 limits come from the node's outcome retention, not from the verifier.
 

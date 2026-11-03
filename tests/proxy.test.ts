@@ -61,9 +61,9 @@ async function sampleTransaction(): Promise<{ hash: string; signer: string }> {
     const block = await rpcAny("block", { block_id: Number(head.body.result.header.height) - back });
     const chunks = block.body.result?.chunks;
     if (!chunks) continue;
-    for (let shard = 0; shard < chunks.length; shard++) {
+    for (const chunkInfo of chunks) {
       try {
-        const chunk = await rpcAny("chunk", { block_id: block.body.result.header.hash, shard_id: shard });
+        const chunk = await rpcAny("chunk", { chunk_id: chunkInfo.chunk_hash });
         const tx = (chunk.body.result?.transactions ?? []).find((t: any) => t.signer_id);
         if (tx) return { hash: tx.hash, signer: tx.signer_id };
       } catch {
@@ -138,7 +138,7 @@ test("honest upstream: tx status is verified and tagged anchored", async () => {
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("x-proven-verified"), "true", JSON.stringify(response.body).slice(0, 200));
     assert.equal(response.headers.get("x-proven-trust"), "anchored");
-    assert.equal(response.body.result.transaction_outcome.outcome.executor_id, tx.signer.length ? response.body.result.transaction_outcome.outcome.executor_id : "");
+    assert.equal(response.body.result.transaction_outcome.outcome.executor_id, tx.signer);
   } finally {
     server.close();
   }
@@ -194,7 +194,7 @@ function startModeLiar(): Promise<{ url: string; set: (mode: string) => void; cl
     req.on("data", (chunk) => (raw += chunk));
     req.on("end", async () => {
       const method = String(JSON.parse(raw || "{}")?.method ?? "");
-      if (mode === "no-proofs" && method.endsWith("light_client_proof")) {
+      if ((mode === "no-proofs" || mode === "tx-hash-no-proofs") && method.endsWith("light_client_proof")) {
         // A node that will not serve proofs: not evidence of anything, so it must not read as a lie.
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ jsonrpc: "2.0", id: "x", error: { code: -32000, message: "proofs disabled" } }));
@@ -215,7 +215,9 @@ function startModeLiar(): Promise<{ url: string; set: (mode: string) => void; cl
           ];
         }
         if (mode === "drop-receipt") x.receipts_outcome.splice(0, 1);
-        if (mode === "tx-hash" && x.transaction?.hash) x.transaction.hash = [...x.transaction.hash].reverse().join("");
+        if ((mode === "tx-hash" || mode === "tx-hash-no-proofs") && x.transaction?.hash) {
+          x.transaction.hash = [...x.transaction.hash].reverse().join("");
+        }
         if (mode === "pending") {
           // What the node returns right after inclusion: the transaction outcome exists, but no
           // receipt has executed yet, and `final_execution_status` says so. (Nodes build
@@ -354,9 +356,15 @@ test("no proof served is 'cannot judge' — forwarded when observing, refused wh
     assert.equal(closed.body.result, undefined, "strict mode must not hand back an unproven payload");
 
     // A forgery is still a forgery without a proof: identity needs none.
-    liar.set("tx-hash");
+    liar.set("tx-hash-no-proofs");
     const forged = await rpc(`http://127.0.0.1:${(observingServer.address() as any).port}`, "EXPERIMENTAL_tx_status", params);
     assert.equal(forged.headers.get("x-proven-verified"), "false");
+    assert.equal(forged.body.error?.code, -32002);
+    assert.match(forged.body.error?.message, /transaction\.hash does not match/);
+    assert.equal(forged.body.result, undefined);
+    assert.equal(observing.counters.unverified, 1);
+    assert.equal(observing.counters.failed, 1);
+    assert.equal(strict.counters.rejected, 1);
   } finally {
     observingServer.close();
     strictServer.close();

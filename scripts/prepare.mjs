@@ -1,6 +1,6 @@
 // `prepare` runs on every install, including `npm ci --omit=dev`, where the compiler is absent.
-// Skip quietly in that case: a published package ships the compiled `dist/`, and a clone that skipped
-// devDependencies can still run every documented command through `npx tsx`.
+// A published package ships `dist/`. A source checkout still needs devDependencies and a build
+// before its compiled entry points can run.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
