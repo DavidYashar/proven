@@ -5,14 +5,49 @@
 `proven` verifies NEAR JSON-RPC answers **client-side** — in Node or in a browser — against the
 signatures of the validators that produced them. If the RPC lies, `proven` says so.
 
+## Clone and run — copy and paste
+
 ```bash
-git clone <this repo> && cd proven
-npm ci && npm run build
-node dist/cli.js tx <transaction_hash> <signer_id> --rpc https://any-near-rpc.example
+git clone https://github.com/DavidYashar/proven.git
+cd proven
+npm ci          # installs AND builds (the "prepare" script), so dist/ is ready
 ```
 
-> The package name `proven` is taken on npm by an unrelated library, so this is run from a clone
-> (or `npm link`), not with `npx proven`.
+Needs Node 20+. Nothing else: no API key, no config, no server of ours. The next three blocks are
+independent — run whichever you want.
+
+> The name `proven` on npm belongs to an unrelated library, so run this from the clone (or `npm link`
+> it) — do not use `npx proven`.
+
+**1. Command line** — verify the chain, a contract's storage, and a real transaction:
+
+```bash
+node dist/cli.js head                                       # VERIFIED, trust anchored
+node dist/cli.js state mpc-prover-0_4_12.bridge.near STATE   # stored bytes proven to a signed state root
+node dist/cli.js find <height>                              # prints "<hash> <signer>"; use the height `head` just printed, minus 10
+node dist/cli.js tx <hash> <signer>                         # every check ✓, verdict VERIFIED
+```
+
+**2. A verifying RPC for any app** — start the proxy and read the verdict off the headers:
+
+```bash
+npm run proxy                      # live on http://localhost:8080; prints the URL and what to read
+curl http://localhost:8080/status  # head, pinned checkpoint, counters
+```
+
+Then in your app: `NEAR_RPC_URL=http://localhost:8080` (PowerShell: `$env:NEAR_RPC_URL="http://localhost:8080"`).
+
+**3. In the browser** — the same checks, run inside the tab, no server involved:
+
+```bash
+npm run web:dev                    # opens http://localhost:5174
+```
+
+Then press **Check the head only** (or paste a transaction hash and press **Verify**), and switch
+**endpoint behaviour** to `forges a validator set` to watch the same page reject a lie.
+
+Each command prints what it proved. When `trust` says `anchored`, the approvals were checked against
+the pinned validator set; when it says something weaker, the line above it says why.
 
 ```text
 transaction 6UxC9DcHMi63NpgSzWcYP5439Nf9iJS7vxzh1MrQqjLY
