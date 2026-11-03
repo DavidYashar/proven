@@ -109,6 +109,37 @@ therefore covers one epoch — but it does not expire, because it can be *walked
 What `proven` still refuses to do is re-pin from the endpoint it is verifying: that would accept
 whatever set that endpoint claims, which is the exact forgery the pin exists to stop.
 
+## Run it yourself — a 10-line integration
+
+The whole change for an existing app is the RPC URL plus reading one header:
+
+```js
+const response = await fetch(NEAR_RPC_URL, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+});
+
+const payload = await response.json();
+const verified = response.headers.get("x-proven-verified");
+
+if (verified !== "true") throw new Error("this answer was not proven against the chain");
+return payload.result;
+```
+
+A runnable version is in [`examples/simple-app.mjs`](./examples/simple-app.mjs):
+
+```bash
+npm ci
+node dist/proxy-cli.js &                          # the verifying endpoint on :8080
+NEAR_RPC_URL=http://localhost:8080 node examples/simple-app.mjs
+NEAR_RPC_URL=https://free.rpc.fastnear.com node examples/simple-app.mjs   # no proxy: nothing verifies
+```
+
+Against the proxy every proof-bearing call reports `ACT verified=true trust=anchored`; against a raw
+RPC the same app reports `STOP verified=none`, because there is no `x-proven-*` header to read. That
+contrast is the product.
+
 ## Tracks it leans on
 
 `open` (primary), `privacy` (verification without asking anyone to trust a server), `security`
