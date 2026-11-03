@@ -343,6 +343,16 @@ provider *fails* the check, it says so and withholds the copy button — a provi
 a light client proof cannot be verified, and pointing an app at one would give you back exactly the
 blind trust this tool exists to remove.
 
+**When your provider is down, the page finds you another one.** The endpoint field is a picker over
+the public mainnet providers (with the key-gated ones labelled as such), and *test providers* asks
+each one the only question that matters — does it answer `next_light_client_block` for a pinned
+epoch-start block — then reports what came back in words you can act on: `responds and serves light
+client blocks`, `it does not expose the light client methods`, `it wants an API key`, `the browser
+could not reach it`. Any provider that passes gets a *use this* button that switches the whole page to
+it and immediately proves the switch worked. The same sweep runs by itself when a check fails for a
+transport reason, so a dead or throttling endpoint ends in a working alternative rather than an error
+popup.
+
 | Verifiability | Methods | Verdict header |
 |---|---|---|
 | full proof | `tx`, `EXPERIMENTAL_tx_status` (transaction outcome, **every receipt walked from it**, and the derived `status`), `query` `view_state` + `include_proof` (exact key), `block` (header hash recomputed, `scope: header_only`) | `x-proven-verified: true` / `self`, trust `anchored`/`quorum` |
@@ -461,6 +471,9 @@ your RPC"** card: our hosted endpoint with a copy button (and an honest warning 
 plus the exact command to run the proxy against whatever provider you just checked. If that provider
 fails the check, the copy buttons are withheld rather than handing you a URL that cannot verify.
 `VITE_PROXY_URL` sets the address it offers.
+
+The endpoint itself is a **provider picker**: *test providers* asks each public provider whether it
+serves light client blocks for the pinned epoch and offers a one-click *use this* for the ones that do.
 
 The **endpoint behaviour** selector turns the same endpoint hostile *inside the page* (it wraps
 `fetch` and tampers with responses before the verifier sees them), so the demo needs no rogue

@@ -23,9 +23,20 @@
 
       <section class="card">
         <div class="row">
+          <label for="provider">provider</label>
+          <select id="provider"></select>
+        </div>
+        <div class="row">
           <label for="rpc">RPC endpoint</label>
           <input id="rpc" type="url" spellcheck="false" value="https://free.rpc.fastnear.com" />
         </div>
+        <div class="row provider-actions">
+          <button id="test-providers" class="ghost" type="button" title="Ask each known provider whether it answers and serves light client blocks">
+            test providers
+          </button>
+          <span class="provider-hint" id="provider-hint"></span>
+        </div>
+        <div id="provider-results" class="provider-results" hidden></div>
         <div class="row checkpoint-row">
           <span class="label">checkpoint</span>
           <span id="checkpoint-status" class="checkpoint-status">loading…</span>

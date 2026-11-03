@@ -336,6 +336,86 @@ button[data-copied="true"] {
   border-color: #4fd07d;
 }
 
+/* ---- provider picker ---- */
+.provider-actions {
+  align-items: center;
+  gap: 10px;
+}
+.provider-hint {
+  font: 11.5px/1.4 var(--mono);
+  color: var(--muted);
+  flex: 1 1 240px;
+}
+.provider-results {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.provider-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  font: 12px/1.4 var(--mono);
+}
+.provider-mark {
+  flex: 0 0 auto;
+  width: 16px;
+  text-align: center;
+  color: var(--muted);
+}
+.provider-row[data-status="ok"] .provider-mark {
+  color: var(--green);
+}
+.provider-row[data-status="no-proofs"] .provider-mark {
+  color: var(--amber);
+}
+.provider-row[data-status="unreachable"] .provider-mark,
+.provider-row[data-status="http-error"] .provider-mark {
+  color: var(--red);
+}
+.provider-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text);
+  word-break: break-word;
+}
+.provider-detail {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.provider-inuse {
+  color: var(--green);
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+.provider-row button {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  font-size: 11px;
+}
+
+/* ---- inline confirm (replaces window.confirm) ---- */
+.confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.confirm .note {
+  margin: 0;
+}
+.confirm-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
 .output h3 {
   margin: 0 0 4px;
   font-size: 13px;
