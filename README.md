@@ -161,7 +161,7 @@ tool exists to make, and the header is what lets an app treat the two differentl
 
 `open` (primary), `privacy` (verification without asking anyone to trust a server), `security`
 (AI agents and policy engines need answers they can check), `agents` (an agent that pays for data
-should be able to verify that data). It uses NEAR's **light client protocol (NEP-25)** — ed25519
+should be able to verify that data). It uses NEAR's **light client protocol** — ed25519
 validator approvals, `next_bp_hash` handoffs, `inner_rest_hash`, `chunk_headers_root`, trie state
 proofs — with no new chain, token, or trusted party.
 
@@ -187,9 +187,9 @@ those proofs and check them, so the answer arrives with a verdict instead of an 
 
 | Layer | Primitive | Source of truth |
 |---|---|---|
-| Header | block hash from `LightClientBlockView` | nearcore `block_header.rs`, NEP-25 |
+| Header | block hash from `LightClientBlockView` | nearcore `block_header.rs`, nomicon ChainSpec |
 | Finality | ed25519 approvals over the endorsement message, >2/3 stake | `core/primitives/src/merkle.rs`, `light_client.rs` |
-| Validator set | `sha256(borsh(next_bps)) == next_bp_hash` | NEP-25 rule 6 |
+| Validator set | `sha256(borsh(next_bps)) == next_bp_hash` | ChainSpec rule 6 |
 | Execution | `outcome_proof` → shard root → block `outcome_root` | `transaction.rs::to_hashes`, `test-loop-tests/.../light_client.rs` |
 | Inclusion | block hash → trusted head `block_merkle_root` | `block_proof` |
 | Contract storage | trie path → verified chunk `prev_state_root` → `chunk_headers_root` → `inner_rest_hash` | `raw_node.rs`, `block_header.rs`, `block.rs` |

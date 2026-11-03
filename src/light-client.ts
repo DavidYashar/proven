@@ -30,7 +30,7 @@ export function borshInnerLite(lite: LightClientBlockView["inner_lite"]): Uint8A
 }
 
 /**
- * Block hash from the light-weight view (NEP-25):
+ * Block hash from the light-weight view (nomicon ChainSpec):
  * `sha256(sha256(sha256(borsh(inner_lite)) ‖ inner_rest_hash) ‖ prev_block_hash)`.
  */
 export function lightClientBlockHash(lite: LightClientBlockLiteView): Uint8Array {
@@ -40,7 +40,7 @@ export function lightClientBlockHash(lite: LightClientBlockLiteView): Uint8Array
 }
 
 /**
- * Message validators sign for the block after next (NEP-25):
+ * Message validators sign for the block after next (nomicon ChainSpec):
  * `borsh(ApprovalInner::Endorsement(next_block_hash)) ‖ u64_le(height + 2)`.
  */
 export function approvalMessage(nextBlockHash: Uint8Array, height: number): Uint8Array {
@@ -83,7 +83,7 @@ export interface ValidateOptions {
 const MAX_UNMATCHED = 40;
 
 /**
- * Verifies a `LightClientBlockView` exactly as an external light client would (NEP-25):
+ * Verifies a `LightClientBlockView` exactly as an external light client would (nomicon ChainSpec):
  * block-hash derivation, ed25519 approvals over the endorsement message, the >2/3 stake
  * threshold, and the `next_bp_hash` commitment to the validator set.
  *
@@ -175,9 +175,9 @@ export function verifyLightClientBlock(
     const head = options.head.inner_lite;
     const epochOk =
       view.inner_lite.epoch_id === head.epoch_id || view.inner_lite.epoch_id === head.next_epoch_id;
-    checks.push({ name: "epoch follows the trusted head (NEP-25 rule 2)", ok: epochOk });
+    checks.push({ name: "epoch follows the trusted head (ChainSpec rule 2)", ok: epochOk });
     checks.push({
-      name: "head moves forward (NEP-25 rule 1)",
+      name: "head moves forward (ChainSpec rule 1)",
       ok: view.inner_lite.height > head.height,
       detail: `${head.height} → ${view.inner_lite.height}`,
     });
