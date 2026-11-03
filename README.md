@@ -40,7 +40,7 @@ Every step below is a self-contained "do X → see Y". Steps 2, 5 and 6 print `t
 which needs a pin. The shipped pin walks itself forward, so a stale one still ends up `anchored`;
 `npm run checkpoint` just re-pins without the walk.
 
-1. **Install and run the offline tests** (no network): `npm ci && npm test` → `pass 40, fail 0`.
+1. **Install and run the offline tests** (no network): `npm ci && npm test` → `pass 42, fail 0`.
 2. **Verify a real transaction** — `npx tsx src/cli.ts tx <hash> <signer>` (get a `<hash> <signer>`
    pair from `npx tsx src/cli.ts find <height>`) → every check prints `✓`, verdict `VERIFIED`.
 3. **Watch it catch a liar** — `npm run test:attack` → an RPC that invents its own validator set is
@@ -167,14 +167,21 @@ proofs — with no new chain, token, or trusted party.
 
 ## Why
 
-Every NEAR wallet, explorer, indexer and AI agent reads the chain through an RPC it does not
-control. A single compromised or buggy endpoint can answer with a transaction that never happened,
-a balance that is not yours, or a "final" block nobody signed. NEAR already ships the cryptography
-to prevent this — **light client proofs** — but almost nobody can use it: there was no browser or
-Node verifier for NEP-25 headers and execution-outcome proofs, and none of the four NEAR explorer
-stacks (near.org, NearBlocks, PikesPeak, near.rocks) verify what they display.
+Almost every NEAR wallet, explorer, indexer and AI agent reads the chain through an RPC it does not
+control, and a single compromised or buggy endpoint can answer with a transaction that never happened,
+a balance that is not yours, or a "final" block nobody signed — with nothing in the response to tell
+you which.
 
-`proven` is that missing client.
+NEAR already ships the cryptography to prevent that: **light client proofs**. The catch is that using
+them means writing a light client. NEAR's own reference implementation is [archived and no longer
+maintained](https://github.com/near/near-light-client), the ChainSpec page that documents the algorithm
+carries a banner saying it may contain errors, and in the one place that matters most it is wrong (see
+[the discoveries below](#things-we-had-to-discover-the-hard-way)). Nothing in a normal app's stack —
+`near-api-js`, an explorer's backend, a wallet's balance read — ever asks for a proof: we measured
+`near-api-js` 7.x, and it does not.
+
+`proven` is the client that was missing: a library, a CLI, a browser page and a drop-in RPC that fetch
+those proofs and check them, so the answer arrives with a verdict instead of an opinion.
 
 ## What it proves
 
@@ -287,7 +294,7 @@ verifies against the producer set it can fetch, reporting `rpc-asserted`.
 ## Demo: catching a lying RPC
 
 ```bash
-npm test            # 40 offline vector, state, bridge and proxy tests
+npm test            # 42 offline vector, state, bridge and proxy tests
 npm run test:proxy  # 10 network-dependent proxy tests
 npm run test:attack # a forged validator set that only a checkpoint can catch
 npm run test:live   # an RPC that tampers with responses on the wire
@@ -518,13 +525,6 @@ A single static page — no backend, no server of ours. Paste a transaction hash
 **Use a recent transaction**, and the checks run in the tab: proofs are fetched from whichever RPC
 you point at and verified locally against ed25519 signatures.
 
-Its visual language is borrowed in spirit from the [NEAR Hackathon site](https://nearhackathon.com):
-one monospace face (IBM Plex Mono) for all UI text, a flat near-black olive ground, square corners,
-hairline frames and a single bright blue for the one action that matters. Both typefaces are bundled
-from `@fontsource` (latin subsets, ~52 kB) rather than fetched from a font CDN, so the page renders
-the same offline and sends nothing to a third party. The semantic colours — verified, rejected,
-not answered — are ours, because on this page they mean something specific.
-
 The page also answers the operational question — *what URL do I give my app?* — with a **"Use this as
 your RPC"** card: the exact command to run the proxy against whatever provider you just checked, and
 the `http://localhost:8080` URL to paste into your app once it is running. If that provider fails the
@@ -617,9 +617,10 @@ limited the same way for historical block heights, while *current* state is alwa
 Recorded because they are wrong or unstated in the obvious places, and anyone rebuilding this will
 hit them:
 
-1. **The documented outcome leaf is wrong.** `docs/ChainSpec/LightClient.md` says
-   `sha256(borsh(execution_outcome))`; nearcore hashes a *list*
-   `[id, sha256(borsh(PartialExecutionOutcome)), sha256(log)…]`.
+1. **The documented outcome leaf is wrong.** `nomicon.io/ChainSpec/LightClient` gives
+   `compute_root(sha256(borsh(execution_outcome)), …)`; nearcore hashes a *list*
+   `[id, sha256(borsh(PartialExecutionOutcome)), sha256(log)…]`. The page carries its own banner
+   ("this page is out of date and may contain errors"), which is the understatement of the exercise.
 2. **`metadata` is not part of the hash.** `PartialExecutionOutcome` excludes logs and
    `ExecutionMetadata` (so the V4 `ProfileDataV3` blob never needs re-encoding) — this is what makes
    a browser verifier practical at all.
@@ -638,16 +639,25 @@ hit them:
    perfectly valid heads flipping to `REJECTED` whenever real participation sits near 2/3. It passes
    for whole epochs — until the sets drift apart. It also means approvals must be attributed **by
    key**, not by index, because equal-stake validators are tie-broken independently per epoch.
-7. **`next_light_client_block` always returns the latest final block**, whatever anchor you pass — it
-   cannot walk epoch by epoch, so a light client must persist its head and poll.
-8. **The proof method was promoted out of `EXPERIMENTAL_`**; older nodes only expose the prefixed name,
-   so the client tries both.
-9. **`fetch` must not be called as a method.** `this.fetchImpl(...)` binds `this` to the client and
-   browsers throw `Illegal invocation`, while Node tolerates it — a bug that only appears once the
-   library runs in a tab, which is exactly where a light client belongs.
-10. **Browsers can reach NEAR RPCs directly.** `free.rpc.fastnear.com` and `near.drpc.org` send
-    `Access-Control-Allow-Origin: *`, so verification needs no proxy. Not every provider serves
-    `next_light_client_block` (dRPC does not), which is why quorum tolerates a provider dropping out.
+7. **`next_light_client_block` answers about epoch boundaries, which is what makes an epoch walk
+   possible.** The hash you pass is the block to look *after*; the answer is the next epoch's boundary
+   block. Ask about the current head and you get `{}` — we first wrote down "always returns the latest
+   final block, whatever anchor you pass" on the strength of that, and it was wrong: ask about an
+   epoch-start hash and you get the *following* epoch. A stale pin therefore steps forward one epoch
+   at a time, each hop signed by the set the previous hop committed to, which is how a shipped pin
+   keeps working without a manual re-pin (`bridgeCheckpoint`, 5 tests in `tests/bridge.test.ts`). Get
+   this backwards and a pin expires permanently instead of walking.
+8. **The proof method was promoted out of `EXPERIMENTAL_`.** The client asks for `light_client_proof`
+   and falls back to the prefixed name if a node answers "method not found".
+9. **`fetch` must not be called as a method, and `Buffer` does not exist in a tab.**
+   `this.fetchImpl(...)` binds `this` to the client and browsers throw `Illegal invocation`, while
+   Node tolerates it; `Buffer` is likewise Node-only. Both bugs appear only once the library runs in a
+   browser, which is exactly where a light client belongs — so the library uses a local `fetch`
+   binding and `Uint8Array` helpers.
+10. **Browsers can reach NEAR RPCs directly.** `free.rpc.fastnear.com`, `near.drpc.org` and
+    `rpc.intea.rs` all send `Access-Control-Allow-Origin: *` (checked with an `Origin` header), so
+    verification needs no proxy. Not every provider serves `next_light_client_block` (dRPC does not),
+    which is why quorum tolerates a provider dropping out.
 11. **A trie proof node is plain `borsh(RawTrieNodeWithSize)`** and its hash is `sha256` of those
     bytes — there is no separate hash field to strip. Children are a `u16` bitmap followed by the
     present child hashes; leaf/extension keys use hex-prefix encoding where `0x10` means "odd".
@@ -658,29 +668,28 @@ hit them:
     balances are unprovable; contract storage is the provable surface.
 14. **`header.prev_state_root` is not any chunk's state root** on a sharded chain — it cannot be used
     as the anchor for a shard's trie.
-15. **No `Buffer`, no bound `fetch`, in a browser.** `Buffer` and `this.fetchImpl(...)` both work in
-    Node and fail in a tab; the library now uses `Uint8Array` helpers and a local `fetch` binding.
-16. **`BlockHeaderInnerRest` has nine versions.** The plain name is the *legacy V1*; protocol 86 uses
-    **V6** (18 fields, `block_body_hash` first, no `chunks_included`/`challenges_root`). Encoding V1
-    produced a plausible-looking hash that matched nothing.
-17. **`chunk_headers_root` is not a merkle root of chunk headers.** It is
+15. **`BlockHeaderInnerRest` has several versions.** The plain name is the *legacy V1*; protocol 86
+    uses **V6** (18 fields, `block_body_hash` first, no `chunks_included`/`challenges_root`). Encoding
+    V1 produced a plausible-looking hash that matched nothing.
+16. **`chunk_headers_root` is not a merkle root of chunk headers.** It is
     `merklize(&[ChunkHashHeight(chunk_hash, height_included)])` — so you need each chunk's *hash*, not
     its borsh.
-18. **`chunk_hash` is recomputable without the signature:**
+17. **`chunk_hash` is recomputable without the signature:**
     `sha256(sha256(borsh(inner)) ‖ encoded_merkle_root)`. That, plus the inner being
     `ShardChunkHeaderInner::V5` at protocol 86, is enough to rebuild the root from the chunk view.
-19. **`CongestionInfo` uses a one-byte tag** even though the enum carries no `use_discriminant`
-    attribute — found by trying both and watching which hash reproduced.
-20. **A JSON-RPC error is not a proxy failure.** fastnear reports a bad `shard_id` as
+18. **`CongestionInfo` carries a one-byte variant tag** in the header encoding; the alternative (no
+    tag) produces a hash that never reproduces, which is how it was settled.
+19. **A JSON-RPC error is not a proxy failure.** fastnear reports a bad `shard_id` as
     `HANDLER_ERROR / INVALID_SHARD_ID` with the message "Server error", so matching on message text
     turned a clean answer into retries, a fallback provider, and a 502. Match the error *type*
-    (`cause.name`), not the prose.
+    (`cause.name`), not the prose — and pass the node's own error through as `unverified`, never as
+    `false`: a node declining to answer is not the chain contradicting you.
 
 ## Status
 
-Validation includes 40 offline tests and 10 network-dependent proxy tests. Mainnet exercises cover
+Validation includes 42 offline tests and 10 network-dependent proxy tests. Mainnet exercises cover
 live tamper demos, a receipt outcome with 5 log hashes, a failed outcome, a contract-storage proof anchored through
-`inner_rest` and `chunk_headers_root`, and outcome proofs up to ~100,000 blocks deep. Historical
+`inner_rest` and `chunk_headers_root`, and outcome proofs 80,000 blocks deep. Historical
 limits come from the node's outcome retention, not from the verifier.
 
 The same code runs in three places, and all three have been exercised against mainnet: the library
