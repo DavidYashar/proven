@@ -420,18 +420,35 @@ therefore sees `-32001` until the transaction settles and its proofs are availab
 
 ### Cost
 
-Measured against `free.rpc.fastnear.com` from a consumer connection (`npx tsx scripts/bench.ts`,
-9 samples, median):
+Measured from a consumer connection against `free.rpc.fastnear.com`, 6 samples per phase with the
+provider given a 20 s cooldown between phases (public endpoints throttle, and a throttled sample
+measures the throttle, not the proxy):
 
-| Call | direct | via proxy |
-|---|---|---|
-| `block` (header hash re-checked locally) | 114 ms | 87 ms |
-| `EXPERIMENTAL_tx_status` (full light client proof) | 105 ms | **168 ms** |
+| Call | direct | via proxy | upstream calls |
+|---|---|---|---|
+| `block` (header hash re-checked locally) | 97 ms | **128 ms** | 1 → 1 |
+| `query` `view_account` (no proof primitive, forwarded) | 90 ms | **107 ms** | 1 → 1 |
+| `EXPERIMENTAL_tx_status` (verified, 4 receipts walked) | 72 ms | **221 ms** | 1 → 6 |
+| `query` `view_state` + `include_proof` (verified) | 94 ms | **286 ms** | 1 → 3 |
 
-So a verified transaction costs ~60 ms more than an unverified one: one extra proof fetch plus a few
-milliseconds of ed25519 and sha256. The head is resolved once and reused for 5 s — before that cache
-the same call measured **685 ms median, 2.4 s p90**, because every request re-resolved it with six
-RPC calls.
+The proxy's own CPU is **0.6 ms per request** (loopback stub: 0.4 ms direct vs 1.0 ms through the
+proxy), and one Node process serves **~1,000–1,450 requests/s** at 1–32 concurrent connections. It is
+not the bottleneck; the upstream is.
+
+What that means in practice:
+
+- **Anything without a proof primitive costs a hop and nothing else** — 17 ms above direct, no extra
+  upstream calls, and no verification work.
+- **A verified transaction costs one proof per receipt** (`tx` + one per receipt, fetched in parallel
+  per frontier round), which is why it is ~3× direct and ~1.4× an unverified answer.
+- **A verified state read costs the proof plus the block whose chunk headers commit the root.** It is
+  the most expensive call, and a warm head cache brings it to ~250 ms; the first read after the cache
+  expires pays the head resolution too.
+- **Sustained traffic is cheaper per request, not dearer**, because the head is resolved once per 5 s
+  and reused. The cache is why the same call measured 685 ms (2.4 s p90) before it existed.
+- **Under throttling the proxy buys success with latency**: it retries with backoff, and at 8
+  concurrent requests it returned 28/40 successful answers where a direct client got 8/40 — the
+  public endpoint's rate limit is the real ceiling for both.
 
 Verifying in bulk should not use the proxy at all: resolve one head and reuse it.
 

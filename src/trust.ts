@@ -121,7 +121,7 @@ export async function fetchSignerSet(
 export async function fetchLightClientBlock(rpc: NearRpc, anchorDepth = 3): Promise<LightClientBlockView> {
   let lastError: Error | undefined;
   let best: LightClientBlockView | undefined;
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const final = await rpc.finalBlock();
       const finalHeight = Number(final.header.height);
@@ -134,8 +134,9 @@ export async function fetchLightClientBlock(rpc: NearRpc, anchorDepth = 3): Prom
         return view;
       } else {
         // The node offered a block a little past the head it reports as final. Nodes disagree about
-        // where finality sits by a block or two; wait briefly, then accept it — the approvals in the
-        // view are what authenticate it, and the caller still checks it is the canonical block.
+        // where finality sits by a block or two, and re-asking costs three upstream calls per attempt,
+        // so the wait is short and the fallback is what actually resolves it: the approvals in the view
+        // are what authenticate it, and the caller still checks it is the canonical block.
         best = view;
         lastError = new Error(
           `light client block ${view.inner_lite.height} is ahead of the final head ${finalHeight}`,
@@ -144,7 +145,7 @@ export async function fetchLightClientBlock(rpc: NearRpc, anchorDepth = 3): Prom
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
     }
-    if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 1200));
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 200));
   }
   if (best) return best;
   throw lastError ?? new Error("could not obtain a light client block");
