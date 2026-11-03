@@ -5,10 +5,12 @@
 // works if that endpoint does. What decides usability here is empirical, not documented:
 //
 //   - reachable        the browser could POST to it at all (a gateway with no CORS looks "down")
-//   - servesProofs     it answers `next_light_client_block`/`light_client_proof` (dRPC does not)
+//   - servesProofs     it answers `next_light_client_block` for a pinned epoch-start block
 //   - needsKey         the public path rejects anonymous calls
 //
-// So the probe reports what happened, and the UI offers the ones that work right now.
+// The probe asks one endpoint — the one the user picked — and reports what happened. It deliberately
+// does not sweep the list: these are public endpoints, and finding an alternative is the user's choice,
+// not a reason to load-test somebody else's infrastructure.
 
 export interface KnownProvider {
   id: string;
@@ -150,24 +152,4 @@ export async function probeProvider(url: string, label = url, anchorHash?: strin
     }
   }
   return done("no-proofs", detail);
-}
-
-/**
- * Probes the known providers in order and resolves with the first usable one that is not the current
- * endpoint. Stops at the first hit rather than sweeping the list, because these are public endpoints
- * and the docs explicitly ask people not to load-test them.
- */
-export async function findWorkingProvider(
-  current: string,
-  onProgress?: (result: ProbeResult) => void,
-  anchorHash?: string,
-): Promise<ProbeResult | null> {
-  const normalized = (url: string) => url.replace(/\/+$/, "");
-  for (const provider of PROVIDERS) {
-    if (!provider.url || normalized(provider.url) === normalized(current)) continue;
-    const result = await probeProvider(provider.url, provider.label, anchorHash);
-    onProgress?.(result);
-    if (result.status === "ok") return result;
-  }
-  return null;
 }

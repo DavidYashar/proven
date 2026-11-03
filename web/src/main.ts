@@ -13,7 +13,7 @@ import {
 } from "../../dist/index.js";
 import checkpointJson from "../../checkpoints/mainnet.json";
 import { createTamperedFetch, LIES, type Lie } from "./tamper.js";
-import { findWorkingProvider, probeProvider, PROVIDERS, type KnownProvider, type ProbeResult } from "./providers.js";
+import { probeProvider, PROVIDERS, type ProbeResult } from "./providers.js";
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
@@ -46,7 +46,7 @@ const el = {
   provider: $<HTMLSelectElement>("provider"),
   providerHint: $<HTMLElement>("provider-hint"),
   providerResults: $<HTMLElement>("provider-results"),
-  testProviders: $<HTMLButtonElement>("test-providers"),
+  checkEndpoint: $<HTMLButtonElement>("check-endpoint"),
 };
 
 /**
@@ -194,12 +194,13 @@ function renderError(message: string): void {
     transport ? "NOT VERIFIED — the endpoint did not answer" : "VERIFICATION FAILED"
   }</p><p class="error">${esc(message)}</p>${
     transport
-      ? `<p class="note">Nothing was proven either way: the endpoint was unreachable or throttling. A public RPC rate-limits under repeated use, so the fix is usually a different endpoint. <button class="ghost" type="button" data-suggest="1">find one that answers</button></p>`
+      ? `<p class="note">Nothing was proven either way: the endpoint was unreachable or throttling. A public RPC rate-limits under repeated use, so the answer is usually a different endpoint — pick one above, or paste a URL that works.</p>`
       : ""
   }`;
   setBadge("failed", false);
-  // Do not leave the user staring at a dead endpoint: look for a working one and offer it.
-  if (transport) void suggestProvider();
+  if (transport) {
+    el.providerHint.textContent = `${labelFor(el.rpc.value.trim())} could not prove anything — pick another provider above, or paste a URL that can`;
+  }
 }
 
 /**
@@ -596,107 +597,63 @@ function syncProviderSelect(): void {
 
 const STATUS_MARK: Record<string, string> = { ok: "✓", "no-proofs": "✗", unreachable: "⛔", "http-error": "⛔" };
 
-/**
- * One row per provider, saying what happened in words a user can act on, and offering to switch to the
- * ones that work. This is the "the endpoint you picked is down" path: it ends in a working choice, not
- * in an error.
- */
-function renderProviderResults(results: ProbeResult[]): void {
-  if (results.length === 0) {
+const normalizeUrl = (url: string): string => url.replace(/\/+$/, "");
+
+const labelFor = (url: string): string =>
+  PROVIDERS.find((p) => p.url && normalizeUrl(p.url) === normalizeUrl(url))?.label ?? url;
+
+/** What the endpoint in the field answered — one row, about that endpoint only. */
+function renderEndpointStatus(result: ProbeResult | null): void {
+  if (!result) {
     el.providerResults.hidden = true;
+    el.providerResults.innerHTML = "";
     return;
   }
-  const current = el.rpc.value.trim().replace(/\/+$/, "");
   el.providerResults.hidden = false;
-  el.providerResults.innerHTML = results
-    .map((result) => {
-      const inUse = result.url.replace(/\/+$/, "") === current;
-      return `<div class="provider-row" data-status="${result.status}">
-        <span class="provider-mark">${STATUS_MARK[result.status] ?? "?"}</span>
-        <span class="provider-name">${esc(result.label)}<br /><span class="provider-detail">${esc(result.detail)} · ${result.ms} ms</span></span>
-        ${
-          inUse
-            ? `<span class="provider-inuse">in use</span>`
-            : result.status === "ok"
-              ? `<button class="ghost" data-use="${esc(result.url)}" type="button">use this</button>`
-              : ""
-        }
-      </div>`;
-    })
-    .join("");
+  el.providerResults.innerHTML = `<div class="provider-row" data-status="${result.status}">
+    <span class="provider-mark">${STATUS_MARK[result.status] ?? "?"}</span>
+    <span class="provider-name">${esc(result.label)}<br /><span class="provider-detail">${esc(result.detail)} · ${result.ms} ms</span></span>
+  </div>`;
 }
 
-/** Switches the whole page to another provider, then proves it works so the user sees green. */
+/**
+ * Asks the one endpoint in the field whether it can prove anything. Only that endpoint: sweeping the
+ * rest of the list would load-test public infrastructure to answer a question nobody asked.
+ */
+async function probeCurrentEndpoint(): Promise<ProbeResult | null> {
+  const url = el.rpc.value.trim();
+  if (!url || probing) return null;
+  probing = true;
+  el.checkEndpoint.disabled = true;
+  el.providerHint.textContent = `asking ${labelFor(url)}…`;
+  try {
+    const result = await probeProvider(url, labelFor(url), pinnedAnchor());
+    renderEndpointStatus(result);
+    el.providerHint.textContent =
+      result.status === "ok"
+        ? `${result.label} serves light client blocks — "Check the head only" verifies it end to end`
+        : `${result.label} cannot prove anything — pick another provider above, or paste a URL that can`;
+    return result;
+  } finally {
+    probing = false;
+    el.checkEndpoint.disabled = false;
+  }
+}
+
+/** Switches the page to a provider the user picked, then proves it works so the answer is visible. */
 async function useProvider(url: string): Promise<void> {
   el.rpc.value = url;
   syncProviderSelect();
   markUpstream("unknown");
-  el.providerHint.textContent = `checking ${url}…`;
+  renderEndpointStatus(null);
+  el.providerHint.textContent = `checking ${labelFor(url)}…`;
   await runHead();
-  const label = PROVIDERS.find((p) => p.url === url)?.label ?? url;
   if (upstreamCheck === "ok") {
-    el.providerHint.textContent = `${label} works — verified against validators`;
+    el.providerHint.textContent = `${labelFor(url)} works — verified against validators`;
     // The checkpoint row was last written for the previous endpoint; it must not go on blaming it.
     void refreshCheckpointStatus();
   } else {
-    el.providerHint.textContent = `${label} still cannot prove anything`;
-  }
-}
-
-async function testAllProviders(): Promise<void> {
-  if (probing) return;
-  probing = true;
-  el.testProviders.disabled = true;
-  el.providerHint.textContent = "asking each provider…";
-  const results: ProbeResult[] = [];
-  renderProviderResults(results);
-
-  // The endpoint in the field first (that is the question being asked), then the rest in listed order.
-  const current = el.rpc.value.trim();
-  const known = PROVIDERS.filter((p): p is KnownProvider & { url: string } => Boolean(p.url));
-  const ordered = [
-    ...known.filter((p) => p.url.replace(/\/+$/, "") === current.replace(/\/+$/, "")),
-    ...known.filter((p) => p.url.replace(/\/+$/, "") !== current.replace(/\/+$/, "")),
-  ];
-
-  for (const provider of ordered) {
-    const result = await probeProvider(provider.url, provider.label, pinnedAnchor());
-    results.push(result);
-    renderProviderResults(results);
-  }
-
-  const usable = results.filter((r) => r.status === "ok").length;
-  el.providerHint.textContent =
-    usable > 0
-      ? `${usable} of ${results.length} answered and serve light client blocks — pick one with "use this"`
-      : "none of these answered from this browser; paste a URL you trust, or run the proxy against your own node";
-  probing = false;
-  el.testProviders.disabled = false;
-}
-
-/**
- * Called when a check fails for a reason that is about the endpoint rather than the data. Probes the
- * known providers only until one works, and offers it — the user came here to get unstuck.
- */
-async function suggestProvider(): Promise<void> {
-  if (probing) return;
-  probing = true;
-  el.providerHint.textContent = "that endpoint could not prove anything — looking for one that can…";
-  const results: ProbeResult[] = [];
-  try {
-    const found = await findWorkingProvider(
-      el.rpc.value.trim(),
-      (result) => {
-        results.push(result);
-        renderProviderResults(results);
-      },
-      pinnedAnchor(),
-    );
-    el.providerHint.textContent = found
-      ? `${found.label} is answering and serves proofs — press "use this" to switch`
-      : "no known provider answered from this browser. If you run your own node, paste its URL above; if the network is fine, this page may be offline.";
-  } finally {
-    probing = false;
+    el.providerHint.textContent = `${labelFor(url)} cannot prove anything — pick another provider above, or paste a URL that can`;
   }
 }
 
@@ -743,6 +700,8 @@ el.rpc.addEventListener("input", () => {
   syncProviderSelect();
   updateUseCard();
 });
+// A pasted or edited endpoint is checked when the user is done with it — that endpoint only.
+el.rpc.addEventListener("change", () => void probeCurrentEndpoint());
 el.provider.addEventListener("change", () => {
   if (el.provider.value === "custom") {
     el.rpc.focus();
@@ -751,14 +710,7 @@ el.provider.addEventListener("change", () => {
   }
   void useProvider(el.provider.value);
 });
-el.testProviders.addEventListener("click", () => void testAllProviders());
-el.providerResults.addEventListener("click", (event) => {
-  const url = (event.target as HTMLElement | null)?.dataset?.use;
-  if (url) void useProvider(url);
-});
-el.output.addEventListener("click", (event) => {
-  if ((event.target as HTMLElement | null)?.dataset?.suggest) void suggestProvider();
-});
+el.checkEndpoint.addEventListener("click", () => void probeCurrentEndpoint());
 el.copyHosted.addEventListener("click", () => void copyText(HOSTED_URL, el.copyHosted));
 el.copyLocal.addEventListener("click", () => void copyText(LOCAL_URL, el.copyLocal));
 el.copyCommand.addEventListener("click", () => void copyText(el.runCmd.textContent ?? "", el.copyCommand));
