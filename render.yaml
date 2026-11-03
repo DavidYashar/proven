@@ -20,8 +20,8 @@ services:
         # next_light_client_block; dRPC and 1RPC do not (see README for the measured matrix).
       - key: PROVEN_CHECKPOINT
         value: checkpoints/mainnet.json
-      # "1" refuses methods that cannot be verified; "0" forwards everything and reports
-      # the verdict in `x-proven-verified`.
+      # "1" refuses anything it cannot verify (methods without a proof, and pending or unprovable
+      # answers); "0" forwards everything and reports the verdict in `x-proven-verified`.
       - key: PROVEN_STRICT
         value: "0"
       - key: NODE_VERSION

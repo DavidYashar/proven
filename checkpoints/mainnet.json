@@ -3,8 +3,8 @@
   "network": "mainnet",
   "epochId": "r2C3x8m1qLQHXNzGUknwS4wJrx6bk3LSPd5v9Yteasc",
   "nextEpochId": "6F6Smvezy9uQsB4ig1iHwZ5Jx9NtfqBQj5hXE5R4jKu5",
-  "height": 222841846,
-  "blockHash": "Eru2MpdxgihMMb2RbPYwqeGARvVcGRjKfwb9mJHPVFTC",
+  "height": 222846604,
+  "blockHash": "FRWiHHu9Z4eBqFdZDXFsa3GuLXBhk1AK2Exfjnfb26pz",
   "validators": [
     {
       "account_id": "astro-stakers.poolv1.near",
@@ -1210,6 +1210,6 @@
       "validator_stake_struct_version": "V1"
     }
   ],
-  "capturedAt": "2026-11-03T07:59:05.896Z",
+  "capturedAt": "2026-11-03T08:43:54.234Z",
   "sourceRpc": "https://free.rpc.fastnear.com"
 }

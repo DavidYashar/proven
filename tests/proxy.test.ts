@@ -193,6 +193,13 @@ function startModeLiar(): Promise<{ url: string; set: (mode: string) => void; cl
     let raw = "";
     req.on("data", (chunk) => (raw += chunk));
     req.on("end", async () => {
+      const method = String(JSON.parse(raw || "{}")?.method ?? "");
+      if (mode === "no-proofs" && method.endsWith("light_client_proof")) {
+        // A node that will not serve proofs: not evidence of anything, so it must not read as a lie.
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: "x", error: { code: -32000, message: "proofs disabled" } }));
+        return;
+      }
       const body = await fetch(UPSTREAM, { method: "POST", headers: { "content-type": "application/json" }, body: raw });
       const json: any = await body.json();
       const x = json.result;
@@ -208,6 +215,24 @@ function startModeLiar(): Promise<{ url: string; set: (mode: string) => void; cl
           ];
         }
         if (mode === "drop-receipt") x.receipts_outcome.splice(0, 1);
+        if (mode === "tx-hash" && x.transaction?.hash) x.transaction.hash = [...x.transaction.hash].reverse().join("");
+        if (mode === "pending") {
+          // What the node returns right after inclusion: the transaction outcome exists, but no
+          // receipt has executed yet, and `final_execution_status` says so. (Nodes build
+          // `receipts_outcome` by walking down from the transaction, so a pending answer is always a
+          // truncated tree — never a child without its parent.)
+          x.final_execution_status = "INCLUDED";
+          x.receipts_outcome = [];
+        }
+        if (mode === "pending-padded" && x.receipts_outcome[0]) {
+          // "Still executing" must not become a hiding place: a receipt the proven tree never names
+          // is padding whether or not the transaction has settled.
+          const fake = structuredClone(x.receipts_outcome[0]);
+          fake.id = "11111111111111111111111111111111";
+          fake.outcome.executor_id = "attacker.near";
+          x.final_execution_status = "INCLUDED";
+          x.receipts_outcome = [fake];
+        }
       }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(json));
@@ -222,14 +247,14 @@ function startModeLiar(): Promise<{ url: string; set: (mode: string) => void; cl
   );
 }
 
-test("a forged status, log or dropped receipt is refused", async () => {
+test("a forged status, log, hash or dropped/padded receipt is refused", async () => {
   const liar = await startModeLiar();
   const proxy = createProvenProxy({ upstream: [liar.url, ...UPSTREAMS], checkpoint });
   const server = await proxy.listen(0, "127.0.0.1");
   try {
     const tx = await sampleTransaction();
     const port = (server.address() as any).port;
-    for (const mode of ["none", "status", "log", "drop-receipt"]) {
+    for (const mode of ["none", "status", "log", "tx-hash", "drop-receipt", "pending", "pending-padded"]) {
       liar.set(mode);
       const response = await rpc(`http://127.0.0.1:${port}`, "EXPERIMENTAL_tx_status", {
         tx_hash: tx.hash,
@@ -237,7 +262,13 @@ test("a forged status, log or dropped receipt is refused", async () => {
       });
       const verdict = response.headers.get("x-proven-verified");
       if (mode === "none") assert.equal(verdict, "true", `honest pass-through: ${JSON.stringify(response.body).slice(0, 160)}`);
-      else assert.equal(verdict, "false", `${mode} must not verify`);
+      // A dropped receipt is a forgery once settled, but merely "cannot judge" while the transaction
+      // is still executing — that distinction is what a wallet polling a fresh tx hits first.
+      else if (mode === "pending") {
+        assert.equal(verdict, "unverified", `pending must not be an accusation: ${JSON.stringify(response.body).slice(0, 160)}`);
+        assert.ok(response.body.result, "the payload must still be returned");
+        assert.equal(response.body.error, undefined);
+      } else assert.equal(verdict, "false", `${mode} must not verify`);
     }
   } finally {
     server.close();
@@ -248,6 +279,7 @@ test("a forged status, log or dropped receipt is refused", async () => {
 test("view_state: a failed proof is not reported as a proven-absent key", async () => {
   // The library returns value=null both for "absent" and for "the proof failed", so the proxy has to
   // consult `verified` first. This is the regression that made an emptied payload look proven.
+  // Needs the network: the proof itself is real, only the payload is emptied.
   const liar = createServer((req, res) => {
     let raw = "";
     req.on("data", (chunk) => (raw += chunk));
@@ -299,6 +331,60 @@ test("strict mode refuses methods that have no proof primitive", async () => {
   }
 });
 
+test("no proof served is 'cannot judge' — forwarded when observing, refused when strict", async () => {
+  // Needs the network: the head and the payload are real, only the proof endpoint is switched off.
+  const liar = await startModeLiar();
+  liar.set("no-proofs");
+  const observing = createProvenProxy({ upstream: [liar.url], checkpoint });
+  const strict = createProvenProxy({ upstream: [liar.url], checkpoint, strict: true });
+  const observingServer = await observing.listen(0, "127.0.0.1");
+  const strictServer = await strict.listen(0, "127.0.0.1");
+  try {
+    const tx = await sampleTransaction();
+    const params = { tx_hash: tx.hash, sender_account_id: tx.signer };
+
+    const open = await rpc(`http://127.0.0.1:${(observingServer.address() as any).port}`, "EXPERIMENTAL_tx_status", params);
+    assert.equal(open.headers.get("x-proven-verified"), "unverified", JSON.stringify(open.body).slice(0, 200));
+    assert.ok(open.body.result, "observing mode hands the payload back with an honest header");
+    assert.match(decodeURIComponent(open.headers.get("x-proven-detail") ?? ""), /no proof/);
+
+    const closed = await rpc(`http://127.0.0.1:${(strictServer.address() as any).port}`, "EXPERIMENTAL_tx_status", params);
+    assert.equal(closed.headers.get("x-proven-verified"), "rejected", JSON.stringify(closed.body).slice(0, 200));
+    assert.equal(closed.body.error?.code, -32001);
+    assert.equal(closed.body.result, undefined, "strict mode must not hand back an unproven payload");
+
+    // A forgery is still a forgery without a proof: identity needs none.
+    liar.set("tx-hash");
+    const forged = await rpc(`http://127.0.0.1:${(observingServer.address() as any).port}`, "EXPERIMENTAL_tx_status", params);
+    assert.equal(forged.headers.get("x-proven-verified"), "false");
+  } finally {
+    observingServer.close();
+    strictServer.close();
+    liar.close();
+  }
+});
+
+test("strict mode refuses a pending transaction instead of forwarding it", async () => {
+  const liar = await startModeLiar();
+  liar.set("pending");
+  const proxy = createProvenProxy({ upstream: [liar.url, ...UPSTREAMS], checkpoint, strict: true });
+  const server = await proxy.listen(0, "127.0.0.1");
+  try {
+    const tx = await sampleTransaction();
+    const port = (server.address() as any).port;
+    const response = await rpc(`http://127.0.0.1:${port}`, "EXPERIMENTAL_tx_status", {
+      tx_hash: tx.hash,
+      sender_account_id: tx.signer,
+    });
+    assert.equal(response.headers.get("x-proven-verified"), "rejected", JSON.stringify(response.body).slice(0, 200));
+    assert.equal(response.body.error?.code, -32001);
+    assert.equal(response.body.result, undefined);
+  } finally {
+    server.close();
+    liar.close();
+  }
+});
+
 test("status page reports the live head and counters", async () => {
   const proxy = createProvenProxy({ upstream: UPSTREAMS, checkpoint });
   const server = await proxy.listen(0, "127.0.0.1");
@@ -307,8 +393,13 @@ test("status page reports the live head and counters", async () => {
     const response = await fetch(`http://127.0.0.1:${port}/status`);
     const body: any = await response.json();
     assert.equal(body.service, "proven proxy");
-    assert.ok(body.head.height > 0);
     assert.ok(body.verifiable.some((v: string) => v.startsWith("query")));
+    assert.ok(typeof body.counters.requests === "number");
+    assert.ok(typeof body.counters.unverified === "number", "unverified answers are counted");
+    // Free endpoints rate-limit under a full suite; the honest answers are "a head" or "this is why
+    // there is no head yet", never a silent zero.
+    if ("error" in body.head) assert.ok(String(body.head.error).length > 0);
+    else assert.ok(body.head.height > 0);
   } finally {
     server.close();
   }

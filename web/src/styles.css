@@ -86,6 +86,13 @@ h2 {
   background: color-mix(in srgb, var(--green) 10%, transparent);
 }
 
+/* Anchored, but to a pin one endpoint supplied on first use: amber, not green. */
+.trust-badge[data-trust="anchored-first-use"] {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 45%, transparent);
+  background: color-mix(in srgb, var(--amber) 10%, transparent);
+}
+
 .trust-badge[data-trust="quorum"] {
   color: var(--amber);
   border-color: color-mix(in srgb, var(--amber) 45%, transparent);
@@ -197,7 +204,8 @@ button.ghost {
   color: var(--green);
 }
 
-.checkpoint-status[data-state="stale"] {
+.checkpoint-status[data-state="stale"],
+.checkpoint-status[data-state="first-use"] {
   color: var(--amber);
 }
 

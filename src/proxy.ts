@@ -19,7 +19,8 @@ import { bytesToBase64, bytesToHex } from "./bytes.js";
  * Point any existing client at it (one URL change) and get:
  *   - `x-proven-verified: true|false|self` on every response
  *   - `x-proven-trust: anchored|quorum|rpc-asserted`
- *   - in `strict` mode, an error for methods that cannot be verified at all
+ *   - in `strict` mode, an error for anything that cannot be verified (unsupported methods, and
+ *     answers that are pending or have no proof) instead of the unproven payload
  *
  * Nothing about the JSON-RPC payload changes, so near-api-js, plain `fetch`, and wallet code keep
  * working. The proxy never signs, never holds keys, and has no server-side state beyond counters.
@@ -29,7 +30,7 @@ export interface ProxyOptions {
   upstream: string | string[];
   /** Pinned validator set; enables anchored verdicts. */
   checkpoint?: Checkpoint;
-  /** Reject methods that cannot be verified instead of forwarding them. */
+  /** Refuse anything that cannot be verified (methods and individual answers) instead of forwarding it. */
   strict?: boolean;
   /** Per-request upstream timeout. */
   timeoutMs?: number;
@@ -49,6 +50,8 @@ export interface ProxyCounters {
   requests: number;
   verified: number;
   selfConsistent: number;
+  /** Could not be judged: pending, oversized, or no proof served. Not an accusation. */
+  unverified: number;
   failed: number;
   rejected: number;
 }
@@ -100,7 +103,7 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
   if (upstreams.length === 0) throw new Error("proxy needs at least one upstream RPC");
   const rpcs = upstreams.map((url) => new NearRpc({ url, timeoutMs: options.timeoutMs ?? 15_000 }));
 
-  const counters: ProxyCounters = { requests: 0, verified: 0, selfConsistent: 0, failed: 0, rejected: 0 };
+  const counters: ProxyCounters = { requests: 0, verified: 0, selfConsistent: 0, unverified: 0, failed: 0, rejected: 0 };
   let preferred = 0;
 
   const send = (res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) => {
@@ -237,23 +240,37 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
     if (method === "tx" || method === "EXPERIMENTAL_tx_status") {
       const { hash, signer } = txParams(params);
       if (!hash || !signer) throw new Error("tx_status without a transaction hash and signer cannot be verified");
-      const resolvedHead = await head();
-      const run = (at: ResolvedHead) =>
-        verifyTransaction(hash, signer, { rpcs, checkpoint: activeCheckpoint, resolvedHead: at });
-      // A cached head can age out of the proof window; retry once against a fresh one.
-      const proven = await run(resolvedHead).catch(async (error) => {
-        if (!cachedHead) throw error;
-        return run(await head(true));
-      });
-      const reported = result?.transaction_outcome?.outcome;
-      // Identity is free to check and closes the cheapest forgeries: the outcome must belong to the
-      // transaction that was asked for.
+      // Identity is free to check and closes the cheapest forgeries: the answer must belong to the
+      // transaction that was asked for. It needs no proof, so it is judged even when none is served.
       if (result?.transaction_outcome?.id && result.transaction_outcome.id !== hash) {
         throw new Error("transaction_outcome.id does not match the requested transaction");
       }
       if (result?.transaction?.signer_id && result.transaction.signer_id !== signer) {
         throw new Error("transaction.signer_id does not match the requested signer");
       }
+      if (result?.transaction?.hash && result.transaction.hash !== hash) {
+        throw new Error("transaction.hash does not match the requested transaction");
+      }
+      const resolvedHead = await head();
+      // The head may simply be behind the block a proof needs; one fresh head per request is worth a
+      // retry, shared by the transaction and every receipt so a large tree cannot multiply it.
+      let freshHead: Promise<ResolvedHead> | undefined;
+      const refreshOnce = () => {
+        if (!freshHead) freshHead = head(true);
+        return freshHead;
+      };
+      const run = (at: ResolvedHead) =>
+        verifyTransaction(hash, signer, { rpcs, checkpoint: activeCheckpoint, resolvedHead: at });
+      // If there is still no proof after a fresh head (the transaction is newer than the light client
+      // head, or no node serves proofs), that is "cannot judge", never evidence of a lie.
+      const proven = await run(resolvedHead)
+        .catch(async () => run(await refreshOnce()))
+        .catch((error) => {
+          throw new Unverifiable(
+            `no proof for the transaction (${error instanceof Error ? error.message.slice(0, 60) : "unknown"})`,
+          );
+        });
+      const reported = result?.transaction_outcome?.outcome;
       if (!proven.verified || !outcomesMatch(reported, proven.value.outcome)) {
         return {
           verdict: "false",
@@ -265,9 +282,12 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
         };
       }
 
-      // `status` and `receipts_outcome` are where a contract call's result and its events actually
-      // live, and receipts are ordered depth-first — the last one is usually the gas refund. Walking
-      // the receipt tree from the transaction outcome is the only way to know the payload is covered.
+      // A transaction that is still executing returns a snapshot: receipts the proven outcome
+      // already commits to may simply not exist in the payload yet. Only `EXECUTED`/`FINAL` mean the
+      // tree is complete, so anything else makes a missing receipt "cannot judge", not "a lie".
+      const executionStatus = String(result?.final_execution_status ?? "").toUpperCase();
+      const settled = executionStatus === "EXECUTED" || executionStatus === "FINAL";
+
       const reportedReceipts: any[] = result?.receipts_outcome ?? [];
       const byId = new Map<string, any>();
       for (const entry of reportedReceipts) {
@@ -277,6 +297,9 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
       }
 
       const provenReceipts = new Map<string, any>();
+      // Receipts the proven tree names that a still-executing answer does not carry yet. The walk keeps
+      // going past them, so padding elsewhere in the payload is still caught.
+      const notYetReported: string[] = [];
       let frontier: string[] = [...(proven.value.outcome.receipt_ids ?? [])];
       for (let round = 0; round < 8 && frontier.length > 0; round++) {
         const batch = frontier.filter((id) => !provenReceipts.has(id));
@@ -287,16 +310,30 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
             // The executor is what the proof request needs as `receiver_id`; if the reported executor
             // is a lie the proof simply fails, so taking it from the payload is safe.
             const entry = byId.get(receiptId);
-            if (!entry) throw new Error(`receipt ${receiptId.slice(0, 8)}… is missing from the response`);
+            if (!entry) {
+              if (settled) throw new Error(`receipt ${receiptId.slice(0, 8)}… is missing from the response`);
+              notYetReported.push(receiptId);
+              return null;
+            }
             const receiptIdValue = entry.outcome?.executor_id;
+            // An entry that is present but malformed is not a timing artefact: honest nodes always name
+            // the executor.
             if (!receiptIdValue) throw new Error(`receipt ${receiptId.slice(0, 8)}… has no executor`);
             const cached = provenOutcomes.get(receiptId);
             if (cached) return { receiptId, proven: cached };
-            const proof = await verifyReceipt(receiptId, receiptIdValue, {
-              rpcs,
-              checkpoint: activeCheckpoint,
-              resolvedHead: await head(),
-            });
+            const prove = async (at: ResolvedHead) =>
+              verifyReceipt(receiptId, receiptIdValue, { rpcs, checkpoint: activeCheckpoint, resolvedHead: at });
+            let proof;
+            try {
+              proof = await prove(await head()).catch(async () => prove(await refreshOnce()));
+            } catch (error) {
+              // No proof available is never evidence of a lie: a receipt whose block the light client
+              // head has not reached yet looks exactly like this, as does a node that will not serve
+              // proofs. Refusing to verify can only ever weaken us, so it is reported as unverified.
+              throw new Unverifiable(
+                `no proof for receipt ${receiptId.slice(0, 8)}… (${error instanceof Error ? error.message.slice(0, 60) : "unknown"})`,
+              );
+            }
             if (!proof.verified) {
               throw new Error(
                 `receipt ${receiptId.slice(0, 8)}… proof failed: ${proof.checks.find((c) => !c.ok)?.name ?? "unknown"}`,
@@ -306,7 +343,9 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
             return { receiptId, proven: proof.value.outcome };
           }),
         );
-        for (const { receiptId, proven: outcome } of provenBatch) {
+        for (const item of provenBatch) {
+          if (!item) continue;
+          const { receiptId, proven: outcome } = item;
           const entry = byId.get(receiptId);
           if (!outcomesMatch(entry.outcome, outcome)) {
             throw new Error(`receipt ${receiptId.slice(0, 8)}… does not match its proof`);
@@ -331,14 +370,17 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
         throw new Unverifiable(`receipt tree is deeper than this verifier walks (${frontier.length} receipts left)`);
       }
 
-      // Nothing may be present that the walk did not reach, and nothing reached may be absent.
+      // Honest nodes build `receipts_outcome` by walking the same tree, so a receipt the proven tree
+      // never reaches is padding — a forgery whether or not the transaction has settled. (A child
+      // cannot appear before its parent has executed, so nothing below a not-yet-reported receipt
+      // can be in an honest payload either.)
       if (byId.size !== provenReceipts.size) {
         const extra = [...byId.keys()].filter((id) => !provenReceipts.has(id));
-        const missing = [...provenReceipts.keys()].filter((id) => !byId.has(id));
-        throw new Error(
-          `receipts do not match the transaction${extra.length ? `; not part of it: ${extra.length}` : ""}${
-            missing.length ? `; omitted: ${missing.length}` : ""
-          }`,
+        throw new Error(`receipts do not match the transaction; not part of it: ${extra.length}`);
+      }
+      if (notYetReported.length > 0) {
+        throw new Unverifiable(
+          `transaction is still executing (${notYetReported.length} receipt(s) not reported yet; status ${executionStatus || "unknown"})`,
         );
       }
 
@@ -384,10 +426,14 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
       const key = Uint8Array.from(Buffer.from(params.prefix_base64 ?? "", "base64"));
       const run = (resolvedHead: ResolvedHead) =>
         verifyContractState(accountId, key, { rpcs, checkpoint: activeCheckpoint, resolvedHead });
-      const proven = await run(await head()).catch(async (error) => {
-        if (!cachedHead) throw error;
-        return run(await head(true));
-      });
+      // As with transactions: a fresh head is worth one retry, and no proof at all means "cannot judge".
+      const proven = await run(await head())
+        .catch(async () => run(await head(true)))
+        .catch((error) => {
+          throw new Unverifiable(
+            `no state proof (${error instanceof Error ? error.message.slice(0, 80) : "unknown"})`,
+          );
+        });
       if (!proven.verified) {
         // `value` is null for a failed proof as well as for a proven-absent key, so this check has to
         // come first — otherwise a failed proof reads as "the key does not exist".
@@ -564,25 +610,43 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
       detail = verified.detail;
       scope = verified.scope ?? "";
     } catch (error) {
-      if (error instanceof Unverifiable) {
-        // Pending, oversized, or no proof served: the caller gets the payload with an honest header
-        // rather than a fake failure — a wallet polling a fresh transaction must not see an error.
+      verdict = error instanceof Unverifiable ? "unverified" : "false";
+      detail = error instanceof Error ? error.message : String(error);
+    }
+
+    if (verdict === "unverified") {
+      // Pending, oversized, only partly covered, or no proof served: "cannot judge", not an accusation.
+      if (options.strict) {
+        // Strict mode promises that nothing unproven is handed back, so it refuses rather than forwards.
+        counters.rejected++;
         send(
           res,
           200,
-          { jsonrpc: "2.0", id: request?.id ?? null, result: upstreamBody },
+          rpcError(request?.id, -32001, `proven proxy (strict): this answer cannot be verified, so it is refused — ${detail}`),
           {
-            "x-proven-verified": "unverified",
-            "x-proven-trust": trust,
+            "x-proven-verified": "rejected",
             "x-proven-method": String(method),
-            "x-proven-detail": encodeURIComponent(error.message),
-            ...(scope ? { "x-proven-scope": scope } : {}),
+            "x-proven-detail": encodeURIComponent(detail),
           },
         );
         return;
       }
-      verdict = "false";
-      detail = error instanceof Error ? error.message : String(error);
+      // Otherwise the caller gets the payload with an honest header rather than a fake failure — a
+      // wallet polling a fresh transaction must not see an error.
+      counters.unverified++;
+      send(
+        res,
+        200,
+        { jsonrpc: "2.0", id: request?.id ?? null, result: upstreamBody },
+        {
+          "x-proven-verified": "unverified",
+          "x-proven-trust": trust,
+          "x-proven-method": String(method),
+          "x-proven-detail": encodeURIComponent(detail),
+          ...(scope ? { "x-proven-scope": scope } : {}),
+        },
+      );
+      return;
     }
 
     if (verdict === "true") counters.verified++;

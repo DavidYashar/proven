@@ -37,17 +37,33 @@ const el = {
 
 const STORAGE_KEY = "proven.checkpoint.v1";
 
-function loadCheckpoint(): Checkpoint {
+/**
+ * The pin this page verifies against. `firstUse` marks a pin that was adopted from one endpoint on
+ * trust rather than walked from a pin this page already trusted; it rides along when the pin is later
+ * walked forward (`bridgeCheckpoint` keeps unknown fields), so the weaker origin is never forgotten.
+ */
+type WebCheckpoint = Checkpoint & { firstUse?: { rpc: string; at: string } };
+type Head = Awaited<ReturnType<typeof resolveHead>>;
+
+const shippedCheckpoint = (): WebCheckpoint => parseCheckpoint(JSON.stringify(checkpointJson));
+
+function loadCheckpoint(): WebCheckpoint {
+  const shipped = shippedCheckpoint();
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) return parseCheckpoint(stored);
+    // A stored pin older than the one this build ships (say, from before a redeploy) is never better:
+    // the shipped pin is the trust root and is nearer the head.
+    if (stored) {
+      const pin: WebCheckpoint = parseCheckpoint(stored);
+      if (pin.height >= shipped.height) return pin;
+    }
   } catch {
     /* ignore corrupt storage and fall back to the shipped pin */
   }
-  return parseCheckpoint(checkpointJson as unknown as Checkpoint);
+  return shipped;
 }
 
-function saveCheckpoint(value: Checkpoint): void {
+function saveCheckpoint(value: WebCheckpoint): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
   } catch {
@@ -55,7 +71,7 @@ function saveCheckpoint(value: Checkpoint): void {
   }
 }
 
-let checkpoint: Checkpoint = loadCheckpoint();
+let checkpoint: WebCheckpoint = loadCheckpoint();
 let busy = false;
 const liveEvents: string[] = [];
 
@@ -70,11 +86,18 @@ const TRUST_TEXT: Record<TrustLevel, string> = {
   "rpc-asserted": "rpc-asserted · self-consistent only",
 };
 
+/** Anchored to a pin taken on first use is only as good as the one endpoint it came from: say so. */
+const firstUseAnchor = (trust: TrustLevel | "idle" | "failed"): boolean =>
+  trust === "anchored" && Boolean(checkpoint.firstUse);
+
+const trustText = (trust: TrustLevel): string =>
+  firstUseAnchor(trust) ? "anchored · pinned on first use from one RPC" : TRUST_TEXT[trust];
+
 function setBadge(trust: TrustLevel | "idle" | "failed", ok = true): void {
   // A rejected result must not advertise the trust level it was aiming for.
   const shown = ok && trust !== "failed" ? trust : "failed";
-  el.badge.dataset.trust = shown;
-  el.badge.textContent = shown === "idle" || shown === "failed" ? shown : TRUST_TEXT[shown];
+  el.badge.dataset.trust = firstUseAnchor(shown) ? "anchored-first-use" : shown;
+  el.badge.textContent = shown === "idle" || shown === "failed" ? shown : trustText(shown);
 }
 
 function renderChecks(checks: Check[]): string {
@@ -97,7 +120,7 @@ function renderResult<T>(title: string, result: ProvenResult<T>, extra: Record<s
     <h3>${esc(title)}</h3>
     <p class="verdict" data-ok="${result.verified}">${result.verified ? "VERIFIED" : "REJECTED"}</p>
     <div class="meta">
-      <span class="k">trust</span><span class="v">${esc(TRUST_TEXT[result.trust])}</span>
+      <span class="k">trust</span><span class="v">${esc(trustText(result.trust))}</span>
       <span class="k">light client head</span><span class="v">${result.head.height} · ${result.head.approvedStakePercent}% of staked NEAR signed</span>
       ${Object.entries(extra)
         .map(([k, v]) => `<span class="k">${esc(k)}</span><span class="v">${esc(v)}</span>`)
@@ -109,14 +132,14 @@ function renderResult<T>(title: string, result: ProvenResult<T>, extra: Record<s
   setBadge(result.trust, result.verified);
 }
 
-function renderHeadOnly(resolved: Awaited<ReturnType<typeof resolveHead>>): void {
+function renderHeadOnly(resolved: Head): void {
   const verified = resolved.checks.every((c) => c.ok);
   el.output.hidden = false;
   el.output.innerHTML = `
     <h3>light client head</h3>
     <p class="verdict" data-ok="${verified}">${verified ? "VERIFIED" : "REJECTED"}</p>
     <div class="meta">
-      <span class="k">trust</span><span class="v">${esc(TRUST_TEXT[resolved.trust])}</span>
+      <span class="k">trust</span><span class="v">${esc(trustText(resolved.trust))}</span>
       <span class="k">height</span><span class="v">${resolved.head.height}</span>
       <span class="k">epoch</span><span class="v">${esc(resolved.view.inner_lite.epoch_id)}</span>
       <span class="k">signed stake</span><span class="v">${resolved.head.approvedStakePercent}% · ${resolved.head.signatureCount} validators</span>
@@ -156,26 +179,52 @@ function rpc(): NearRpc {
 
 async function refreshCheckpointStatus(): Promise<void> {
   try {
-    const resolved = await resolveHead({ rpcs: [rpc()], checkpoint, requireAnchor: false });
-    const fresh = resolved.trust === "anchored";
-    const age = checkpoint.capturedAt
-      ? Math.round((Date.now() - Date.parse(checkpoint.capturedAt)) / 3_600_000)
-      : null;
-    el.checkpoint.dataset.state = fresh ? "fresh" : "stale";
-    el.checkpoint.textContent = fresh
-      ? `epoch ${checkpoint.epochId.slice(0, 8)}… · ${checkpoint.validators.length} producers pinned${
-          age === null ? "" : ` · pinned ${age}h ago`
-        } · fresh`
-      : `epoch ${checkpoint.epochId.slice(0, 8)}… no longer covers the head (${
-          resolved.view.inner_lite.epoch_id.slice(0, 8)
-        }…) — press "re-pin current set" to restore anchored trust`;
+    // Pin upkeep goes to the endpoint as it is, never through the demo's tampering: a lie chosen for
+    // the next verification must not be what decides whether the pin is kept fresh.
+    const resolved = await resolveHead({ rpcs: [new NearRpc(el.rpc.value.trim())], checkpoint, requireAnchor: false });
+    adoptWalkedPin(resolved);
+    showCheckpointStatus(resolved);
   } catch (error) {
     el.checkpoint.dataset.state = "stale";
     el.checkpoint.textContent = `checkpoint unverified: ${error instanceof Error ? error.message : String(error)}`;
   }
 }
 
+function showCheckpointStatus(resolved: Head): void {
+  const fresh = resolved.trust === "anchored";
+  const age = checkpoint.capturedAt
+    ? Math.round((Date.now() - Date.parse(checkpoint.capturedAt)) / 3_600_000)
+    : null;
+  el.checkpoint.dataset.state = !fresh ? "stale" : checkpoint.firstUse ? "first-use" : "fresh";
+  el.checkpoint.textContent = !fresh
+    ? `epoch ${checkpoint.epochId.slice(0, 8)}… no longer covers the head (${
+        resolved.view.inner_lite.epoch_id.slice(0, 8)
+      }…) — press "re-pin current set" to restore anchored trust`
+    : `epoch ${checkpoint.epochId.slice(0, 8)}… · ${checkpoint.validators.length} producers pinned${
+        checkpoint.firstUse ? ` on first use from ${checkpoint.firstUse.rpc}` : ""
+      }${age === null ? "" : ` · ${age}h ago`} · fresh`;
+}
+
+/**
+ * Keeps a pin the library walked forward. Every hop was signature-checked by the set before it, so it
+ * is exactly as trustworthy as the pin it started from — and keeping it means the next verification
+ * does not pay for the same walk again.
+ */
+function adoptWalkedPin(resolved: Head): void {
+  if (!resolved.bridgedPin) return;
+  checkpoint = resolved.bridgedPin;
+  saveCheckpoint(checkpoint);
+  showCheckpointStatus(resolved);
+}
+
 const trustOptions = () => ({ checkpoint, requireAnchor: el.requireAnchor.checked });
+
+/** Resolves the head once per action (the verifiers reuse it) and keeps any pin it walked forward. */
+async function headFor(client: NearRpc): Promise<Head> {
+  const resolved = await resolveHead({ rpcs: [client], ...trustOptions() });
+  adoptWalkedPin(resolved);
+  return resolved;
+}
 
 async function runVerify(): Promise<void> {
   if (busy) return;
@@ -192,7 +241,9 @@ async function runVerify(): Promise<void> {
         "a forged validator set has no real proofs to serve — use “Check the head only” to see this attack",
       );
     }
-    const result = await verifyTransaction(hash, signer, { rpc: rpc(), ...trustOptions() });
+    const client = rpc();
+    const resolvedHead = await headFor(client);
+    const result = await verifyTransaction(hash, signer, { rpc: client, ...trustOptions(), resolvedHead });
     const outcome = result.value.outcome;
     const extra: Record<string, string> = {
       "executed at": `block ${result.value.height}`,
@@ -219,9 +270,12 @@ async function runState(): Promise<void> {
   }
   setBusy(true);
   try {
+    const client = rpc();
+    const resolvedHead = await headFor(client);
     const result = await verifyContractState(accountId, new TextEncoder().encode(key), {
-      rpc: rpc(),
+      rpc: client,
       ...trustOptions(),
+      resolvedHead,
     });
     const notes = [...result.notes, ...liveEvents];
     el.output.hidden = false;
@@ -229,7 +283,7 @@ async function runState(): Promise<void> {
       <h3>contract storage ${esc(accountId)} ["${esc(key)}"]</h3>
       <p class="verdict" data-ok="${result.verified}">${result.verified ? "VERIFIED" : "REJECTED"}</p>
       <div class="meta">
-        <span class="k">trust</span><span class="v">${esc(TRUST_TEXT[result.trust])}</span>
+        <span class="k">trust</span><span class="v">${esc(trustText(result.trust))}</span>
         <span class="k">value</span><span class="v">${esc(result.value.valueText ?? "(absent)")}</span>
         <span class="k">state root</span><span class="v">${esc(result.value.stateRoot)}</span>
         <span class="k">shard</span><span class="v">${result.value.shard ?? "not located"} · block ${result.value.rootBlockHeight}</span>
@@ -249,7 +303,7 @@ async function runHead(): Promise<void> {
   if (busy) return;
   setBusy(true);
   try {
-    renderHeadOnly(await resolveHead({ rpcs: [rpc()], ...trustOptions() }));
+    renderHeadOnly(await headFor(rpc()));
   } catch (error) {
     renderError(error instanceof Error ? error.message : String(error));
   } finally {
@@ -284,11 +338,58 @@ async function repin(): Promise<void> {
   if (busy) return;
   setBusy(true);
   try {
-    // Trust-on-first-use: adopt the producer set this endpoint reports right now. It is the set that
-    // signs this epoch, so it keeps working until the epoch turns over.
     const rpcUrl = el.rpc.value.trim();
-    const resolved = await resolveHead({ rpcs: [new NearRpc(rpcUrl)] });
-    checkpoint = makeCheckpoint(resolved.view, resolved.signers, { network: "mainnet", sourceRpc: rpcUrl });
+    // Pin upkeep never goes through the demo's tampering.
+    const client = new NearRpc(rpcUrl);
+
+    // First, reach the current epoch from a pin this page already trusts. Each hop is signed by the set
+    // the previous one committed to, so the result is exactly as strong as the starting pin — no
+    // endpoint is taken at its word. The shipped pin is the root; a stored pin that was itself walked
+    // from it is closer to the head, so it is tried first.
+    const candidates = [checkpoint, shippedCheckpoint()].filter(
+      (pin, index, all) => !pin.firstUse && all.findIndex((other) => other.blockHash === pin.blockHash) === index,
+    );
+    const reasons: string[] = [];
+    for (const candidate of candidates) {
+      try {
+        const resolved = await resolveHead({ rpcs: [client], checkpoint: candidate, requireAnchor: true });
+        if (resolved.trust === "anchored" && resolved.checks.every((c) => c.ok)) {
+          checkpoint = resolved.bridgedPin ?? candidate;
+          saveCheckpoint(checkpoint);
+          showCheckpointStatus(resolved);
+          el.output.hidden = true;
+          return;
+        }
+        reasons.push(
+          resolved.notes[resolved.notes.length - 1] ?? resolved.checks.find((c) => !c.ok)?.detail ?? "not anchored",
+        );
+      } catch (error) {
+        reasons.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    // Only when no trusted pin can be walked forward is trust-on-first-use on the table, and then only
+    // with the user's say-so: it takes the producer set from this one endpoint on its word.
+    const accepted = window.confirm(
+      `No trusted pin could be walked forward to the current epoch through ${rpcUrl}` +
+        `${reasons.length ? ` (${reasons.join("; ")})` : ""}.\n\n` +
+        "An archival endpoint (for example https://archival-rpc.mainnet.fastnear.com) keeps the history the walk needs.\n\n" +
+        "Otherwise, pin the set this endpoint reports right now? That is trust-on-first-use: if this endpoint is lying, " +
+        "everything verified afterwards is anchored to its lie. It will be labelled as such.",
+    );
+    if (!accepted) {
+      await refreshCheckpointStatus();
+      el.output.hidden = true;
+      return;
+    }
+    const resolved = await resolveHead({ rpcs: [client] });
+    if (!resolved.checks.every((c) => c.ok)) {
+      throw new Error("this endpoint's own head does not verify against the set it reports; nothing was pinned");
+    }
+    checkpoint = {
+      ...makeCheckpoint(resolved.view, resolved.signers, { network: "mainnet", sourceRpc: rpcUrl }),
+      firstUse: { rpc: rpcUrl, at: new Date().toISOString() },
+    };
     saveCheckpoint(checkpoint);
     await refreshCheckpointStatus();
     el.output.hidden = true;

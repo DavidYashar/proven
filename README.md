@@ -303,15 +303,25 @@ carries the code hash rather than the code) and, when present, the **`receipts[]
 
 A transaction that is still executing has no receipt proofs yet, so it comes back
 `x-proven-verified: unverified` with the payload intact — never a `-32002` error, because a wallet
-polling a fresh transaction is normal. Only an answer that *contradicts* the chain is refused.
+polling a fresh transaction is normal. "Cannot judge" covers: a receipt the proven outcome commits to
+is not in the payload yet while the transaction has not settled (`final_execution_status` is not
+`EXECUTED`/`FINAL`); no proof can be obtained, even after one retry against a fresh head (the
+transaction or receipt is newer than the light client head, or no upstream serves proofs); and a
+receipt tree larger than one request verifies. Anything that *contradicts* the chain is refused,
+settled or not: an id, hash or signer that is not the one asked for, an outcome or receipt that does
+not match its proof, a receipt the proven tree never names, and — once settled — a missing receipt
+or a status that differs from the one derived from the proofs.
 
 A `view_state` read is only claimed as verified when it is an **exact key** at the head: a prefix
 query returns a range of values that one trie path does not commit to, and a `block_id` names a height
 the verifier is not querying. Those are forwarded as `unverified` rather than over-claimed.
 
 A response that **fails** verification is never handed back: the proxy returns a JSON-RPC error
-(`-32002`) instead, so a lying upstream cannot inject data silently. `PROVEN_STRICT=1` additionally
-refuses methods that have no proof primitive at all, rather than forwarding them unverified.
+(`-32002`) instead, so a lying upstream cannot inject data silently. `PROVEN_STRICT=1` goes further and
+hands back nothing unproven: methods with no proof primitive, and any individual answer that would
+otherwise be `unverified` (pending, no proof served, keys a proof does not cover), are refused with
+`-32001` and `x-proven-verified: rejected`. A wallet polling a fresh transaction through a strict proxy
+therefore sees `-32001` until the transaction settles and its proofs are available.
 
 ### Cost
 
@@ -412,9 +422,12 @@ pinned checkpoint    → 0% of 556906176M NEAR, 3 matched no key
 Deploying is `npm run web:build` and uploading `web/dist` to any static host (Cloudflare Pages,
 Netlify, Vercel, GitHub Pages). `base: "./"` is set so subpaths work.
 
-Inside the app, "re-pin current set" stores a trust-on-first-use pin in `localStorage`; the pin
-shipped in `checkpoints/mainnet.json` expires with the epoch, so the UI shows when it has gone stale
-rather than silently pretending to be anchored.
+Inside the app, "re-pin current set" first walks a pin the page already trusts (the stored one, then
+the shipped `checkpoints/mainnet.json`) forward to the current epoch, checking each epoch's
+signatures, so the new pin is as strong as the shipped one. Only if no endpoint keeps enough history
+for that walk does it offer trust-on-first-use, after a confirmation, and a pin taken that way is
+labelled "pinned on first use from one RPC" (amber, not green) for as long as it is used. Pins the
+library walks forward during normal use are saved too, so the walk is paid once, not per check.
 
 ## A note on NEAR's own docs
 

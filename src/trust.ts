@@ -63,6 +63,26 @@ const asRpc = (rpc: string | NearRpc): NearRpc => (rpc instanceof NearRpc ? rpc 
 const EPOCH_BLOCKS = 43_200;
 
 /**
+ * A walk that cannot run (pruned endpoint, pin older than the node's history) costs seconds and six or
+ * more calls. Remember the failure briefly so a steady stream of requests does not pay it each time.
+ */
+const bridgeFailures = new Map<string, number>();
+const BRIDGE_RETRY_MS = 5 * 60_000;
+
+function bridgeBlocked(key: string): boolean {
+  const at = bridgeFailures.get(key);
+  if (at === undefined) return false;
+  if (Date.now() - at < BRIDGE_RETRY_MS) return true;
+  bridgeFailures.delete(key);
+  return false;
+}
+
+function rememberBridgeFailure(key: string): void {
+  if (bridgeFailures.size > 32) bridgeFailures.clear();
+  bridgeFailures.set(key, Date.now());
+}
+
+/**
  * The keys that sign a block in epoch `targetEpochId` are the `next_bps` of a view from the
  * **previous** epoch — `next_bps` is the set for the epoch *after* the view's own.
  *
@@ -207,11 +227,23 @@ export async function resolveHead(options: ResolveHeadOptions): Promise<Resolved
       // The pin is stale, but it can be walked forward: each epoch's producer set is committed by the
       // previous epoch's signed header. Recovering here is what keeps a shipped pin usable days later.
       // Every provider gets a turn, because a pruned endpoint drops old blocks while an archival one
-      // keeps them ? and this runs in strict mode too, since a walked pin is fully signature-checked.
+      // keeps them — and this runs in strict mode too, since a walked pin is fully signature-checked.
+      // Keyed by the providers too: a walk a pruned endpoint could not serve may well succeed on an
+      // archival one, and switching to it must not wait out the cooldown.
+      const bridgeKey = `${pin.blockHash}:${epochId}:${rpcs.map((rpc) => rpc.url).join(",")}`;
       let bridged: Awaited<ReturnType<typeof bridgeCheckpoint>> = null;
-      for (const rpc of rpcs) {
-        bridged = await bridgeCheckpoint(rpc, pin, epochId).catch(() => null);
-        if (bridged) break;
+      if (bridgeBlocked(bridgeKey)) {
+        notes.push("stale pin not walked: the last walk to this epoch failed less than 5 minutes ago");
+      } else {
+        for (const rpc of rpcs) {
+          bridged = await bridgeCheckpoint(rpc, pin, epochId).catch(() => null);
+          if (bridged) break;
+        }
+        if (bridged) bridgeFailures.delete(bridgeKey);
+        else {
+          rememberBridgeFailure(bridgeKey);
+          notes.push("could not walk the stale pin forward (no provider kept the history); will retry in 5 minutes");
+        }
       }
       if (bridged) {
         pin = bridged.checkpoint;

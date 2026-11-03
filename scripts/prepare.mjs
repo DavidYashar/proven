@@ -1,5 +1,6 @@
 // `prepare` runs on every install, including `npm ci --omit=dev`, where the compiler is absent.
-// Build when it is available and say nothing when it is not - the package still works from `dist/`.
+// Skip quietly in that case: a published package ships the compiled `dist/`, and a clone that skipped
+// devDependencies can still run every documented command through `npx tsx`.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -10,4 +11,5 @@ if (!existsSync(tsc)) process.exit(0);
 
 // Run the compiler through this same node binary: no shell, no npx, no PATH assumptions.
 const result = spawnSync(process.execPath, [tsc, "-p", "tsconfig.json"], { stdio: "inherit", cwd: root });
-process.exit(result.status ?? 0);
+// A missing status means the compiler was killed by a signal; that is a failure, not success.
+process.exit(result.status ?? 1);
