@@ -486,6 +486,11 @@ The endpoint itself is a **provider picker**: *check this endpoint* asks the one
 whether it serves light client blocks for the pinned epoch, and choosing a provider verifies the head
 against it. Only that endpoint is ever contacted.
 
+The page is ordered by what a visitor came for: the endpoint picker, then the verdict card (every check
+that ran, and which one failed), then the copy card, and only then the attack demo. So checking a
+provider reports right under the picker, and an action taken further down the page (a transaction, a
+storage value) scrolls its verdict back into view rather than printing it off-screen.
+
 The **endpoint behaviour** selector turns the same endpoint hostile *inside the page* (it wraps
 `fetch` and tampers with responses before the verifier sees them), so the demo needs no rogue
 server:

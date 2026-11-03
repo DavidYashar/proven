@@ -167,6 +167,7 @@ function renderResult<T>(title: string, result: ProvenResult<T>, extra: Record<s
   const notes = [...result.notes, ...liveEvents];
   if (verdict.kind === "transport") notes.push(TRANSPORT_NOTE);
   el.output.hidden = false;
+  revealOutput();
   el.output.innerHTML = `
     <h3>${esc(title)}</h3>
     <p class="verdict" data-ok="${result.verified}" data-kind="${verdict.kind}">${verdict.text}</p>
@@ -188,6 +189,7 @@ function renderHeadOnly(resolved: Head): void {
   const verdict = verdictOf(verified, resolved.checks);
   const notes = [...resolved.notes, ...(verdict.kind === "transport" ? [TRANSPORT_NOTE] : [])];
   el.output.hidden = false;
+  revealOutput();
   el.output.innerHTML = `
     <h3>light client head</h3>
     <p class="verdict" data-ok="${verified}" data-kind="${verdict.kind}">${verdict.text}</p>
@@ -214,6 +216,7 @@ const looksLikeTransport = (message: string): boolean =>
 
 function renderError(message: string): void {
   el.output.hidden = false;
+  revealOutput();
   const transport = looksLikeTransport(message);
   el.output.innerHTML = `<p class="verdict" data-ok="false" data-kind="${transport ? "transport" : "verdict"}">${
     transport ? "NOT VERIFIED — the endpoint did not answer" : "VERIFICATION FAILED"
@@ -235,6 +238,7 @@ function renderError(message: string): void {
 function confirmInline(html: string, yesLabel: string, noLabel: string): Promise<boolean> {
   return new Promise((resolve) => {
     el.output.hidden = false;
+    revealOutput();
     el.output.innerHTML = `<div class="confirm">${html}<div class="confirm-actions">
       <button class="ghost" type="button" data-confirm="yes">${esc(yesLabel)}</button>
       <button class="ghost" type="button" data-confirm="no">${esc(noLabel)}</button>
@@ -293,6 +297,18 @@ function withSilenceLimit<T>(work: Promise<T>): Promise<T> {
   });
 }
 
+/**
+ * Scrolls the verdict into view when it would otherwise land off-screen. The output card sits between
+ * the endpoint picker and the copy card, so an action triggered further down the page (Verify, Verify
+ * storage) reports *above* the button the user just pressed — without this, the answer can appear
+ * entirely outside the viewport.
+ */
+function revealOutput(): void {
+  const rect = el.output.getBoundingClientRect();
+  const offscreen = rect.top < 0 || rect.top > window.innerHeight - 80;
+  if (offscreen) el.output.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
 function setBusy(value: boolean): void {
   busy = value;
   for (const button of [el.verify, el.example, el.head, el.repin, el.verifyState]) button.disabled = value;
@@ -305,6 +321,7 @@ function setBusy(value: boolean): void {
   lastResponseAt = Date.now();
   busySince = Date.now();
   el.output.hidden = false;
+  revealOutput();
   // Never a spinner with no information in it: say how long, and what is being waited on.
   const paint = (): void => {
     const seconds = Math.round((Date.now() - busySince) / 1000);
@@ -466,6 +483,7 @@ async function runState(): Promise<void> {
     });
     const notes = [...result.notes, ...liveEvents];
     el.output.hidden = false;
+    revealOutput();
     el.output.innerHTML = `
       <h3>contract storage ${esc(accountId)} ["${esc(key)}"]</h3>
       <p class="verdict" data-ok="${result.verified}">${result.verified ? "VERIFIED" : "REJECTED"}</p>
