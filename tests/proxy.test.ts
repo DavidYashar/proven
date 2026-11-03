@@ -185,6 +185,66 @@ test("lying upstream: a rewritten receipt is refused, not forwarded", async () =
   }
 });
 
+/** An upstream that forwards honestly but rewrites one field of a tx_status answer. */
+function startModeLiar(): Promise<{ url: string; set: (mode: string) => void; close: () => void }> {
+  let mode = "none";
+  const b64 = (s: string) => Buffer.from(s).toString("base64");
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", async () => {
+      const body = await fetch(UPSTREAM, { method: "POST", headers: { "content-type": "application/json" }, body: raw });
+      const json: any = await body.json();
+      const x = json.result;
+      if (x && Array.isArray(x.receipts_outcome)) {
+        if (mode === "status") x.status = { SuccessValue: b64('"pwned"') };
+        if (mode === "first-receipt-status" && x.receipts_outcome[0]) {
+          x.receipts_outcome[0].outcome.status = { SuccessValue: b64('"pwned"') };
+        }
+        if (mode === "log") {
+          const target = x.receipts_outcome[0] ?? x.receipts_outcome.at(-1);
+          target.outcome.logs = [
+            'EVENT_JSON:{"standard":"nep141","event":"ft_transfer","data":[{"new_owner_id":"attacker.near"}]}',
+          ];
+        }
+        if (mode === "drop-receipt") x.receipts_outcome.splice(0, 1);
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(json));
+    });
+  });
+  return new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({ url: `http://127.0.0.1:${port}`, set: (next: string) => (mode = next), close: () => server.close() });
+    }),
+  );
+}
+
+test("a forged status, log or dropped receipt is refused", async () => {
+  const liar = await startModeLiar();
+  const proxy = createProvenProxy({ upstream: [liar.url, ...UPSTREAMS], checkpoint });
+  const server = await proxy.listen(0, "127.0.0.1");
+  try {
+    const tx = await sampleTransaction();
+    const port = (server.address() as any).port;
+    for (const mode of ["none", "status", "log", "drop-receipt"]) {
+      liar.set(mode);
+      const response = await rpc(`http://127.0.0.1:${port}`, "EXPERIMENTAL_tx_status", {
+        tx_hash: tx.hash,
+        sender_account_id: tx.signer,
+      });
+      const verdict = response.headers.get("x-proven-verified");
+      if (mode === "none") assert.equal(verdict, "true", `honest pass-through: ${JSON.stringify(response.body).slice(0, 160)}`);
+      else assert.equal(verdict, "false", `${mode} must not verify`);
+    }
+  } finally {
+    server.close();
+    liar.close();
+  }
+});
+
 test("strict mode refuses methods that have no proof primitive", async () => {
   const proxy = createProvenProxy({ upstream: UPSTREAMS, checkpoint, strict: true });
   const server = await proxy.listen(0, "127.0.0.1");

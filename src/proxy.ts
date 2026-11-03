@@ -111,7 +111,11 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
     error: { code, message, ...(data === undefined ? {} : { data }) },
   });
 
-  /** Compares the outcome the upstream reported with the one the proof committed to. */
+  /**
+   * Compares the outcome the upstream reported with the one the proof committed to. Logs are part of
+   * the committed hash (`sha256(log)` per entry), so a forged `EVENT_JSON` line is caught here — and
+   * that matters, because wallets and indexers act on those lines.
+   */
   function outcomesMatch(reported: any, proven: any): boolean {
     if (!reported || !proven) return false;
     if (reported.executor_id !== proven.executor_id) return false;
@@ -122,10 +126,21 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
     if (reportedStatus !== provenStatus) return false;
     if (reportedStatus === "SuccessValue" && reported.status.SuccessValue !== proven.status.SuccessValue) return false;
     if (reportedStatus === "SuccessReceiptId" && reported.status.SuccessReceiptId !== proven.status.SuccessReceiptId) return false;
+    // A failure carries no payload that survives hashing, so only "it failed" is provable.
+    const reportedLogs: string[] = reported.logs ?? [];
+    const provenLogs: string[] = proven.logs ?? [];
+    if (reportedLogs.length !== provenLogs.length) return false;
+    for (let i = 0; i < reportedLogs.length; i++) if (reportedLogs[i] !== provenLogs[i]) return false;
     const a = (reported.receipt_ids ?? []).join(",");
     const b = (proven.receipt_ids ?? []).join(",");
     return a === b;
   }
+
+  /**
+   * Proven outcomes never change once final, and wallets poll the same transaction repeatedly, so
+   * remembering them turns a repeated `tx_status` into a single proof fetch.
+   */
+  const provenOutcomes = new Map<string, any>();
 
   /**
    * The head is what every proof is checked against, and resolving it costs several RPC round-trips.
@@ -149,7 +164,9 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
     // stashed set belongs to, verify with it instead of downgrading.
     if (nextCheckpoint && resolved.view.inner_lite.epoch_id === nextCheckpoint.epochId) {
       const promoted = await resolveHead({ rpcs, checkpoint: nextCheckpoint });
-      if (promoted.trust === "anchored") {
+      // `anchored` only means the epoch label matched; require every signature check to have passed
+      // before adopting the set, or one bad promotion fails every proof until a restart.
+      if (promoted.trust === "anchored" && promoted.checks.every((c) => c.ok)) {
         activeCheckpoint = nextCheckpoint;
         nextCheckpoint = undefined;
         resolved = promoted;
@@ -161,10 +178,16 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
     }
 
     if (resolved.nextPin) {
-      nextCheckpoint = makeCheckpoint(resolved.view, resolved.nextPin.validators, {
-        network: activeCheckpoint?.network ?? "mainnet",
-        sourceRpc: activeCheckpoint?.sourceRpc,
-      });
+      // Label it with the epoch it belongs to, not the one in the view: `makeCheckpoint` takes the
+      // label from `view.inner_lite.epoch_id`, which is the *current* epoch, while these validators
+      // are the next one's.
+      nextCheckpoint = {
+        ...makeCheckpoint(resolved.view, resolved.nextPin.validators, {
+          network: activeCheckpoint?.network ?? "mainnet",
+          sourceRpc: activeCheckpoint?.sourceRpc,
+        }),
+        epochId: resolved.nextPin.epochId,
+      };
     }
     return resolved;
   }
@@ -212,57 +235,138 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
         };
       }
 
-      // The transaction outcome is only half the answer: `status` and `receipts_outcome` — where the
-      // result of a contract call actually lives — come from the last receipt, so prove that too.
-      const receipts: any[] = result?.receipts_outcome ?? [];
-      let scope = "transaction_outcome";
-      if (receipts.length > 0) {
-        const last = receipts[receipts.length - 1];
-        const receiptId = last?.id;
-        const receiverId = last?.outcome?.executor_id;
-        if (!receiptId || !receiverId) throw new Error("receipt without id/executor cannot be verified");
-        const receiptProof = await verifyReceipt(receiptId, receiverId, {
-          rpcs,
-          checkpoint: activeCheckpoint,
-          resolvedHead: await head(),
-        });
-        if (!receiptProof.verified || !outcomesMatch(last.outcome, receiptProof.value.outcome)) {
-          return {
-            verdict: "false",
-            trust: receiptProof.trust,
-            detail: receiptProof.verified
-              ? `receipt ${receiptId.slice(0, 8)}… does not match its proof`
-              : `receipt proof failed: ${receiptProof.checks.find((c) => !c.ok)?.name ?? "unknown"}`,
-            scope: "transaction_outcome+receipt",
-          };
+      // `status` and `receipts_outcome` are where a contract call's result and its events actually
+      // live, and receipts are ordered depth-first — the last one is usually the gas refund. Walking
+      // the receipt tree from the transaction outcome is the only way to know the payload is covered.
+      const reportedReceipts: any[] = result?.receipts_outcome ?? [];
+      const byId = new Map<string, any>();
+      for (const entry of reportedReceipts) {
+        if (!entry?.id) throw new Error("receipt without an id");
+        if (byId.has(entry.id)) throw new Error(`receipt ${entry.id.slice(0, 8)}… appears twice`);
+        byId.set(entry.id, entry);
+      }
+
+      const provenReceipts = new Map<string, any>();
+      let frontier: string[] = [...(proven.value.outcome.receipt_ids ?? [])];
+      for (let round = 0; round < 8 && frontier.length > 0; round++) {
+        const batch = frontier.filter((id) => !provenReceipts.has(id));
+        frontier = [];
+        if (batch.length > 32) throw new Error(`transaction has too many receipts to verify in one request (${batch.length})`);
+        const provenBatch = await Promise.all(
+          batch.map(async (receiptId) => {
+            // The executor is what the proof request needs as `receiver_id`; if the reported executor
+            // is a lie the proof simply fails, so taking it from the payload is safe.
+            const entry = byId.get(receiptId);
+            if (!entry) throw new Error(`receipt ${receiptId.slice(0, 8)}… is missing from the response`);
+            const receiptIdValue = entry.outcome?.executor_id;
+            if (!receiptIdValue) throw new Error(`receipt ${receiptId.slice(0, 8)}… has no executor`);
+            const cached = provenOutcomes.get(receiptId);
+            if (cached) return { receiptId, proven: cached };
+            const proof = await verifyReceipt(receiptId, receiptIdValue, {
+              rpcs,
+              checkpoint: activeCheckpoint,
+              resolvedHead: await head(),
+            });
+            if (!proof.verified) {
+              throw new Error(
+                `receipt ${receiptId.slice(0, 8)}… proof failed: ${proof.checks.find((c) => !c.ok)?.name ?? "unknown"}`,
+              );
+            }
+            provenOutcomes.set(receiptId, proof.value.outcome);
+            return { receiptId, proven: proof.value.outcome };
+          }),
+        );
+        for (const { receiptId, proven: outcome } of provenBatch) {
+          const entry = byId.get(receiptId);
+          if (!outcomesMatch(entry.outcome, outcome)) {
+            throw new Error(`receipt ${receiptId.slice(0, 8)}… does not match its proof`);
+          }
+          provenReceipts.set(receiptId, outcome);
+          frontier.push(...(outcome.receipt_ids ?? []));
         }
-        scope = receipts.length === 1 ? "transaction_outcome+receipt" : `transaction_outcome+last_of_${receipts.length}_receipts`;
+      }
+
+      // Nothing may be present that the walk did not reach, and nothing reached may be absent.
+      if (byId.size !== provenReceipts.size) {
+        const extra = [...byId.keys()].filter((id) => !provenReceipts.has(id));
+        const missing = [...provenReceipts.keys()].filter((id) => !byId.has(id));
+        throw new Error(
+          `receipts do not match the transaction${extra.length ? `; not part of it: ${extra.length}` : ""}${
+            missing.length ? `; omitted: ${missing.length}` : ""
+          }`,
+        );
+      }
+
+      // `status` is the last outcome in the SuccessReceiptId chain; derive it and compare.
+      let cursor: any = proven.value.outcome.status;
+      let finalStatus: any = cursor;
+      for (let hops = 0; hops < 32; hops++) {
+        if (cursor?.SuccessReceiptId) {
+          const next = provenReceipts.get(cursor.SuccessReceiptId);
+          if (!next) break;
+          cursor = next.status;
+          finalStatus = cursor;
+          continue;
+        }
+        break;
+      }
+      const reportedStatus = Object.keys(result?.status ?? {})[0];
+      const provenStatus = Object.keys(finalStatus ?? {})[0];
+      if (reportedStatus !== provenStatus) {
+        throw new Error(`reported status ${reportedStatus ?? "none"} does not match the proven ${provenStatus ?? "none"}`);
+      }
+      if (reportedStatus === "SuccessValue" && result.status.SuccessValue !== finalStatus.SuccessValue) {
+        throw new Error("reported return value does not match the proven one");
       }
 
       return {
         verdict: "true",
         trust: proven.trust,
         detail: `${proven.value.height} · ${proven.head.approvedStakePercent}% stake`,
-        scope,
+        // The transaction body is not covered: re-hashing it needs every action re-encoded, and a
+        // deploy's view carries the code hash rather than the code.
+        scope: `transaction_outcome${provenReceipts.size ? `+${provenReceipts.size}_receipt(s)` : ""}+status;tx_body_unverified`,
       };
     }
 
     if (method === "query" && params?.request_type === "view_state" && params?.include_proof) {
       const accountId = params.account_id;
-      const key = params.prefix_base64 ? Uint8Array.from(Buffer.from(params.prefix_base64, "base64")) : new Uint8Array();
+      const key = Uint8Array.from(Buffer.from(params.prefix_base64 ?? "", "base64"));
       const run = (resolvedHead: ResolvedHead) =>
         verifyContractState(accountId, key, { rpcs, checkpoint: activeCheckpoint, resolvedHead });
       const proven = await run(await head()).catch(async (error) => {
         if (!cachedHead) throw error;
         return run(await head(true));
       });
-      const reported = (result?.values ?? [])[0];
-      const matches = proven.value.value === null ? !reported : reported && bytesToBase64(proven.value.value) === reported.value;
-      const ok = proven.verified && matches;
+
+      // The proof covers exactly one trie path, so only the entry whose *decoded* key equals the
+      // requested key is covered. Matching on base64 text would let a re-encoded key slip through.
+      const values: any[] = result?.values ?? [];
+      const sameKey = (a: string | undefined, b: Uint8Array) => {
+        if (!a) return false;
+        const bytes = Uint8Array.from(Buffer.from(a, "base64"));
+        return bytes.length === b.length && bytes.every((byte, i) => byte === b[i]);
+      };
+      const entry = values.find((v) => sameKey(v?.key, key));
+      if (proven.value.value === null) {
+        if (entry) throw new Error("the payload returns a value the proof says is absent");
+      } else if (!entry || entry.value !== bytesToBase64(proven.value.value)) {
+        throw new Error("the returned value does not match the trie proof");
+      }
+      if (values.length > (entry ? 1 : 0)) {
+        // Neighbouring keys legitimately share a prefix, but one trie path cannot commit to them.
+        return {
+          verdict: "unverified",
+          trust: proven.trust,
+          detail: `the requested key is proven, but ${values.length - (entry ? 1 : 0)} other key(s) in the payload are not covered by its proof`,
+          scope: "exact_key_only",
+        };
+      }
       return {
-        verdict: ok ? "true" : "false",
+        verdict: "true",
         trust: proven.trust,
-        detail: ok ? `state root ${proven.value.stateRoot.slice(0, 12)}…` : "returned values do not match the trie proof",
+        detail: `state root ${proven.value.stateRoot.slice(0, 12)}…`,
+        scope: "exact_key",
       };
     }
 
@@ -305,6 +409,8 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
         verdict: ok ? "self" : "false",
         trust: "self-consistent",
         detail: ok ? `header hash recomputed (${bytesToHex(computed).slice(0, 12)}…)` : "header hash does not match its contents",
+        // Only the header is recomputed: `chunks[]` and `author` are forwarded unchecked.
+        scope: "header_only",
       };
     }
 
@@ -318,6 +424,11 @@ export function createProvenProxy(options: ProxyOptions): ProvenProxy {
       request = JSON.parse(body);
     } catch {
       send(res, 400, rpcError(null, -32700, "parse error"));
+      return;
+    }
+    if (Array.isArray(request)) {
+      // A batch would need a verdict per element; refusing is better than silently unverifying all of it.
+      send(res, 200, rpcError(null, -32600, "proven proxy does not accept JSON-RPC batches; send one request at a time"));
       return;
     }
     const method = request?.method;

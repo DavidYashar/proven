@@ -1,4 +1,4 @@
-import { checkpointMismatch, type Checkpoint } from "./checkpoint.js";
+import { bridgeCheckpoint, checkpointMismatch, type Checkpoint } from "./checkpoint.js";
 import { verifyLightClientBlock } from "./light-client.js";
 import { NearRpc } from "./rpc.js";
 import { b58encode } from "./base58.js";
@@ -54,7 +54,7 @@ export interface ResolvedHead {
 
 const asRpc = (rpc: string | NearRpc): NearRpc => (rpc instanceof NearRpc ? rpc : new NearRpc(rpc));
 
-/** NEAR epochs are 43,200 blocks (~12h at 1s/block). */
+/** NEAR epochs are 43,200 blocks (~7h at ~0.57s/block). */
 const EPOCH_BLOCKS = 43_200;
 
 /**
@@ -195,9 +195,22 @@ export async function resolveHead(options: ResolveHeadOptions): Promise<Resolved
   let trust: TrustLevel = quorum ? "quorum" : "rpc-asserted";
 
   if (options.checkpoint) {
-    const mismatch = checkpointMismatch(options.checkpoint, view);
+    let pin = options.checkpoint;
+    let mismatch = checkpointMismatch(pin, view);
+    if (mismatch !== null && !options.requireAnchor && (pin.version ?? 0) >= 3) {
+      // The pin is stale, but it can be walked forward: each epoch's producer set is committed by the
+      // previous epoch's signed header. Recovering here is what keeps a shipped pin usable days later.
+      const bridged = await bridgeCheckpoint(rpcs[0], pin, epochId).catch(() => null);
+      if (bridged) {
+        pin = bridged.checkpoint;
+        mismatch = checkpointMismatch(pin, view);
+        notes.push(
+          `stale pin walked forward ${bridged.steps} epoch(s) (${options.checkpoint.epochId.slice(0, 8)}… -> ${pin.epochId.slice(0, 8)}…), each step signed by the set the previous one committed to`,
+        );
+      }
+    }
     if (mismatch === null) {
-      signers = options.checkpoint.validators;
+      signers = pin.validators;
       signerSource = "pinned checkpoint";
       trust = "anchored";
       checks.push({
@@ -217,8 +230,13 @@ export async function resolveHead(options: ResolveHeadOptions): Promise<Resolved
   if (!signers) {
     // No usable pin: fetch the set that actually signed this epoch rather than trusting the one the
     // response carries (`view.next_bps` belongs to the *next* epoch, so verifying against it silently
-    // drops every validator whose position moved at the boundary).
-    const fetched = await fetchSignerSet(rpcs[0], epochId, Number(view.inner_lite.height)).catch(() => null);
+    // drops every validator whose position moved at the boundary). Any provider may answer — a wrong
+    // set only makes verification fail, so one dead endpoint must not block the others.
+    let fetched: ValidatorStake[] | null = null;
+    for (const rpc of rpcs) {
+      fetched = await fetchSignerSet(rpc, epochId, Number(view.inner_lite.height)).catch(() => null);
+      if (fetched) break;
+    }
     if (fetched) {
       signers = fetched;
       signerSource = "previous epoch's producer set, fetched from the chain";

@@ -31,10 +31,10 @@ transaction 6UxC9DcHMi63NpgSzWcYP5439Nf9iJS7vxzh1MrQqjLY
 ## Try it in 60 seconds
 
 Every step below is a self-contained "do X → see Y". Steps 2, 5 and 6 print `trust: anchored`,
-which needs a pin for the *current* epoch — run `npm run checkpoint` first (a pin covers one ~12h
-epoch; without one the same proofs still verify, but say `rpc-asserted` instead).
+which needs a pin. The shipped pin walks itself forward, so a stale one still ends up `anchored`;
+`npm run checkpoint` just re-pins without the walk.
 
-1. **Install and run the offline vectors** (no network): `npm ci && npm test` → `pass 22, fail 0`.
+1. **Install and run the offline vectors** (no network): `npm ci && npm test` → `pass 30, fail 0`.
 2. **Verify a real transaction** — `npx tsx src/cli.ts tx <hash> <signer>` (get a `<hash> <signer>`
    pair from `npx tsx src/cli.ts find <height>`) → every check prints `✓`, verdict `VERIFIED`.
 3. **Watch it catch a liar** — `npm run test:attack` → an RPC that invents its own validator set is
@@ -49,7 +49,8 @@ epoch; without one the same proofs still verify, but say `rpc-asserted` instead)
 7. **Open the browser app** — `npm run web:dev`, then click *Verify* → proofs are checked inside the
    page; switch *endpoint behaviour* to "rewrites the outcome" / "forges a validator set" / "rewrites
    stored state" and click *Verify* again → `REJECTED`.
-8. **Re-pin whenever the epoch turns over** — `npm run checkpoint` → `trust: anchored` again.
+8. **Leave the pin alone and it still works** — wait out an epoch; the next run walks the pin
+   forward ("stale pin walked forward 1 epoch(s)") and prints `trust: anchored` again.
 9. **Deploy it** — push the repo and apply `render.yaml` (one Node service for the proxy, one static
    site for the app).
 
@@ -82,18 +83,29 @@ A **pin** (checkpoint) is that key list, recorded earlier from a moment you trus
 one epoch, with the hash proving the file wasn't edited. Now the RPC cannot swap the keys, and a lie
 needs >2/3 of NEAR's real stake.
 
-NEAR replaces its producer set every epoch (~12 h), so a pin covers exactly one epoch. Two things
-follow:
+NEAR replaces its producer set every epoch (**~7 h**: 43,200 blocks at ~0.57 s/block, measured). A pin
+therefore covers one epoch — but it does not expire, because it can be *walked*:
 
-- **A running verifier keeps itself anchored.** While a pin still authenticates the head, that head's
-  header commits to the *next* epoch's producers (`next_bp_hash`), so the next set arrives
-  signed. The proxy stashes it and promotes it only when the head actually enters that epoch. No
-  re-pinning, no trusting the endpoint — a service that stays up stays `anchored` indefinitely.
-- **A verifier that has been off for more than an epoch cannot bridge the gap.** The public RPC has
-  no "walk forward one epoch" call, so there is nothing to chain from; `proven` drops to
-  `quorum`/`rpc-asserted`, says which, and asks for a re-pin.
+- **A running verifier rolls its own pin.** While a pin still authenticates the head, that head's
+  header commits to the *next* epoch's producers (`next_bp_hash`), so the next set arrives signed.
+  The proxy stashes it and promotes it only when the head actually enters that epoch.
+- **A verifier that was off for days walks back into place.** `next_light_client_block(hash)` returns
+  the light client block of the *next* epoch, so from the pinned block you can step forward one epoch
+  at a time, each step checked with the set the previous step committed to. A pin from a week ago
+  recovers on its own:
 
-`proven` never auto-pins behind your back: re-pinning from the endpoint it is verifying would accept
+  ```text
+  note: stale pin walked forward 1 epoch(s) (gW2aCeaW… -> 4SNpeKx4…), each step signed by the set
+        the previous one committed to
+    ✓ checkpoint applies to this head — epoch 4SNpeKx4…, 100 pinned producers
+  ```
+
+  The walk needs the node to still serve those blocks; a pruned endpoint covers a couple of epochs,
+  an archival one covers as far back as you like.
+- **Only if the walk cannot run** (a v2-era pin, or the node has dropped the history) does trust fall
+  to `quorum`/`rpc-asserted` — and it says so.
+
+What `proven` still refuses to do is re-pin from the endpoint it is verifying: that would accept
 whatever set that endpoint claims, which is the exact forgery the pin exists to stop.
 
 ## Tracks it leans on
@@ -194,8 +206,8 @@ proven head --require-anchor                      # fail instead of silently dow
 proven tx <hash> <signer> --rpcs https://a,https://b   # quorum across providers
 ```
 
-Checkpoints expire with the epoch (~12h), which is why shipping one is a convenience, not a
-guarantee: refresh with `proven checkpoint`, and run the strict path in CI. `proven` deliberately
+A pin covers one ~7h epoch, but it walks forward by itself (see *The pin, and why it expires*), so
+`proven checkpoint` is only needed if you want a pin that does not have to be walked at all. `proven` deliberately
 does **not** re-pin automatically — an automatic re-pin would accept whatever set the endpoint
 claims, which is exactly the forgery the pin exists to stop.
 
@@ -280,10 +292,13 @@ keep working untouched. The verdict rides in headers.
 
 | Verifiability | Methods | Verdict header |
 |---|---|---|
-| full proof | `tx`, `EXPERIMENTAL_tx_status` (transaction outcome **and** the final receipt), `query` `view_state` + `include_proof` (exact key), `block` (header hash recomputed) | `x-proven-verified: true` / `self`, trust `anchored`/`quorum` |
+| full proof | `tx`, `EXPERIMENTAL_tx_status` (transaction outcome, **every receipt walked from it**, and the derived `status`), `query` `view_state` + `include_proof` (exact key), `block` (header hash recomputed, `scope: header_only`) | `x-proven-verified: true` / `self`, trust `anchored`/`quorum` |
 | none | everything else | `x-proven-verified: unverified` — or `rejected` in strict mode |
 
-`x-proven-scope` says exactly what was checked, e.g. `transaction_outcome+last_of_2_receipts`.
+`x-proven-scope` says exactly what was checked, e.g.
+`transaction_outcome+2_receipt(s)+status;tx_body_unverified`. The transaction *body* is the one part
+that is not covered: re-hashing it means re-encoding every action, and a deploy's view carries the
+code hash rather than the code. It is named in the scope rather than quietly assumed.
 
 A `view_state` read is only claimed as verified when it is an **exact key** at the head: a prefix
 query returns a range of values that one trie path does not commit to, and a `block_id` names a height
@@ -516,8 +531,8 @@ Known gaps:
 2. **Header encoding is protocol-pinned.** `BlockHeaderInnerRestV6` + `ShardChunkHeaderInnerV5` match
    protocol 86; a future protocol bump must add the new variants (the code degrades to
    `quorum`/`rpc-asserted` instead of guessing, and the check says which hash failed).
-3. **A pin covers one epoch** (~12h). A process that stays up rolls its own pin forward from the
-   `next_bp_hash` of a head the current pin already authenticated, so it stays `anchored` without
-   help; a verifier that was off for longer than an epoch has nothing to chain from and must re-pin.
-   Re-pinning is manual on purpose: doing it automatically would re-adopt whatever set the endpoint
-   claims.
+3. **A pin covers one epoch (~7h), but it walks forward.** A running process promotes the next set
+   from the `next_bp_hash` of a head the current pin authenticated; a process that was off walks the
+   epoch chain one step at a time. Both need the node to still serve those light client blocks
+   (pruned endpoints cover a couple of epochs, archival ones go back further). Only when neither can
+   run does trust fall to `quorum`/`rpc-asserted`, and it says so.

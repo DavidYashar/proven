@@ -198,7 +198,7 @@ export async function verifyContractState(
     trust = agree ? "quorum" : "rpc-asserted";
   }
 
-  // Locate the shard whose chunk header commits to this root.
+  // Bind the root to the head's chunk headers and locate the shard that commits to it.
   if (anchored) trust = "anchored";
   else {
     notes.push(

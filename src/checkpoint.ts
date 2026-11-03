@@ -1,6 +1,8 @@
-import { b58encode } from "./base58.js";
+import { ed25519 } from "@noble/curves/ed25519.js";
+import { b58decode, b58encode } from "./base58.js";
 import { sha256 } from "./borsh.js";
-import { borshValidatorStakes, lightClientBlockHash } from "./light-client.js";
+import { borshValidatorStakes, lightClientBlockHash, verifyLightClientBlock } from "./light-client.js";
+import type { NearRpc } from "./rpc.js";
 import type { LightClientBlockView, ValidatorStake } from "./types.js";
 
 /**
@@ -15,13 +17,13 @@ import type { LightClientBlockView, ValidatorStake } from "./types.js";
  * view from the *previous* epoch (see `fetchSignerSet`). Anchoring is then a signature check, not a
  * hash comparison: >2/3 of this pinned stake must have signed the head.
  *
- * A pin is only valid while the network is still in `epochId` (epochs are ~12h), so `proven
+ * A pin is only valid while the network is still in `epochId` (epochs are ~7h), so `proven
  * checkpoint` regenerates it and `proven` falls back to weaker trust levels when it is stale rather
  * than silently pretending to be anchored.
  */
 export interface Checkpoint {
-  /** Format marker: v2 pins the epoch's *signing* set. v1 pinned the next epoch's set by mistake. */
-  version: 2;
+  /** Format marker. v2 pins the epoch's signing set; v3 also carries the next epoch's set. */
+  version: 2 | 3;
   network: string;
   /** Epoch these producers sign for. */
   epochId: string;
@@ -33,6 +35,11 @@ export interface Checkpoint {
   validators: ValidatorStake[];
   /** base58 sha256(borsh(validators)) — integrity check for the file itself. */
   validatorsHash: string;
+  /**
+   * Producers of `nextEpochId`, which the pinned head's `next_bp_hash` already committed to. With
+   * these a stale pin can be walked forward one epoch at a time instead of being abandoned.
+   */
+  nextValidators?: ValidatorStake[];
   capturedAt?: string;
   sourceRpc?: string;
 }
@@ -50,7 +57,7 @@ export function makeCheckpoint(
     throw new Error(`no producer set supplied for epoch ${view.inner_lite.epoch_id.slice(0, 8)}…; cannot build a checkpoint`);
   }
   return {
-    version: 2,
+    version: 3,
     network: options.network ?? "mainnet",
     epochId: view.inner_lite.epoch_id,
     nextEpochId: view.inner_lite.next_epoch_id,
@@ -58,6 +65,9 @@ export function makeCheckpoint(
     blockHash: b58encode(lightClientBlockHash(view)),
     validators: [...signers],
     validatorsHash: validatorsHash(signers),
+    // Committed by this header's `next_bp_hash`, so it needs no further trust and lets the pin be
+    // walked forward later.
+    nextValidators: view.next_bps?.length ? [...view.next_bps] : undefined,
     capturedAt: new Date().toISOString(),
     sourceRpc: options.sourceRpc,
   };
@@ -72,7 +82,7 @@ export function parseCheckpoint(input: string | Checkpoint): Checkpoint {
   if (!Array.isArray(parsed.validators) || parsed.validators.length === 0) {
     throw new Error("checkpoint is missing its validator set");
   }
-  if (parsed.version !== 2) {
+  if (parsed.version !== 2 && parsed.version !== 3) {
     throw new Error(
       "this checkpoint predates the v2 format, which pins the producers that actually sign the epoch; run `proven checkpoint` to re-pin",
     );
@@ -81,6 +91,7 @@ export function parseCheckpoint(input: string | Checkpoint): Checkpoint {
   if (recomputed !== parsed.validatorsHash) {
     throw new Error(`checkpoint is corrupt: validatorsHash is ${parsed.validatorsHash} but its validators hash to ${recomputed}`);
   }
+  if (parsed.nextValidators && parsed.nextValidators.length === 0) delete parsed.nextValidators;
   return parsed;
 }
 
@@ -92,5 +103,71 @@ export function checkpointMismatch(checkpoint: Checkpoint, view: LightClientBloc
   // Matching epochs is all that can be checked by equality: the pin holds the *signing* set, while
   // the view carries the *next* epoch's set. Whether the pin is real is settled by the signature
   // check that follows, which is stronger than comparing hashes.
+  return null;
+}
+
+/**
+ * Walks a stale pin forward one epoch at a time until it covers `targetEpochId`.
+ *
+ * Each step asks for the light client block following the last one we trust and checks its approvals
+ * with the set we already authenticated; that authenticated header then commits (`next_bp_hash`) to
+ * the set for the epoch after it. This is ordinary light-client sync, so nothing is taken from the
+ * endpoint on trust — any wrong or missing step returns `null` and the caller falls back to weaker
+ * trust levels.
+ */
+export async function bridgeCheckpoint(
+  rpc: NearRpc,
+  pin: Checkpoint,
+  targetEpochId: string,
+  maxSteps = 24,
+): Promise<{ checkpoint: Checkpoint; steps: number } | null> {
+  if (pin.epochId === targetEpochId) return { checkpoint: pin, steps: 0 };
+
+  // The view we are about to ask for belongs to `expectedEpoch`, and its approvals are signed by
+  // `signers` — the set the pin's own header committed to.
+  let expectedEpoch = pin.nextEpochId;
+  let signers = pin.nextValidators;
+  let cursor = pin.blockHash;
+  let steps = 0;
+
+  while (steps < maxSteps) {
+    if (!expectedEpoch || !signers?.length) return null;
+    let view: LightClientBlockView | null;
+    try {
+      view = (await rpc.nextLightClientBlock(cursor)) as LightClientBlockView | null;
+    } catch {
+      return null;
+    }
+    if (!view?.inner_lite) return null;
+    // One hop must advance exactly one epoch, or the sets we hold do not cover the gap.
+    if (view.inner_lite.epoch_id !== expectedEpoch) return null;
+
+    const checked = verifyLightClientBlock(view, { validators: signers });
+    if (!checked.checks.every((c) => c.ok)) return null;
+    steps++;
+
+    const nextSigners = view.next_bps ?? [];
+    if (view.inner_lite.epoch_id === targetEpochId) {
+      return {
+        checkpoint: {
+          ...pin,
+          version: 3,
+          epochId: view.inner_lite.epoch_id,
+          nextEpochId: view.inner_lite.next_epoch_id,
+          height: view.inner_lite.height,
+          blockHash: b58encode(lightClientBlockHash(view)),
+          validators: signers,
+          validatorsHash: validatorsHash(signers),
+          nextValidators: nextSigners.length ? nextSigners : undefined,
+          capturedAt: new Date().toISOString(),
+        },
+        steps,
+      };
+    }
+    if (!nextSigners.length) return null;
+    cursor = b58encode(lightClientBlockHash(view));
+    expectedEpoch = view.inner_lite.next_epoch_id;
+    signers = nextSigners;
+  }
   return null;
 }

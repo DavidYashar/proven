@@ -133,5 +133,5 @@ test("a fabricated single-node path never anchors, and its value is not surfaced
 
 test("the fixture checkpoint is internally consistent", () => {
   assert.equal(validatorsHash(checkpoint.validators), checkpoint.validatorsHash);
-  assert.equal(b58encode(Buffer.from(view.inner_lite.epoch_id, "utf8")).length > 0, true);
+  assert.ok(checkpoint.validators.length > 0);
 });
