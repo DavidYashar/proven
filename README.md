@@ -469,12 +469,19 @@ import { verifyTransaction } from "proven";         // any JS runtime
 
 ```bash
 npm run web:dev     # http://localhost:5174
-npm run web:build   # static bundle in web/dist (~89 kB, ~34 kB gzipped)
+npm run web:build   # static bundle in web/dist (~190 kB, ~97 kB gzipped, fonts included)
 ```
 
 A single static page — no backend, no server of ours. Paste a transaction hash, or press
 **Use a recent transaction**, and the checks run in the tab: proofs are fetched from whichever RPC
 you point at and verified locally against ed25519 signatures.
+
+Its visual language is borrowed in spirit from the [NEAR Hackathon site](https://nearhackathon.com):
+one monospace face (IBM Plex Mono) for all UI text, a flat near-black olive ground, square corners,
+hairline frames and a single bright blue for the one action that matters. Both typefaces are bundled
+from `@fontsource` (latin subsets, ~52 kB) rather than fetched from a font CDN, so the page renders
+the same offline and sends nothing to a third party. The semantic colours — verified, rejected,
+not answered — are ours, because on this page they mean something specific.
 
 The page also answers the operational question — *what URL do I give my app?* — with a **"Use this as
 your RPC"** card: our hosted endpoint with a copy button (and an honest warning when it is asleep),
